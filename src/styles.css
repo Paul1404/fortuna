@@ -1,0 +1,445 @@
+@import "tailwindcss";
+@import "@fontsource/spectral/latin-300.css";
+@import "@fontsource/spectral/latin-400.css";
+@import "@fontsource/spectral/latin-500.css";
+@import "@fontsource/spectral/latin-300-italic.css";
+@import "@fontsource/instrument-sans/latin-400.css";
+@import "@fontsource/instrument-sans/latin-500.css";
+@import "@fontsource/instrument-sans/latin-600.css";
+@import "@fontsource/ibm-plex-mono/latin-400.css";
+@import "@fontsource/ibm-plex-mono/latin-500.css";
+
+@custom-variant dark (&:is(.dark *));
+
+/* Fortuna design tokens (fortuna-brand/tokens/fortuna-tokens.css) mapped onto
+   Tailwind v4 theme variables. Light is the default; `.dark` flips it.
+
+   The navy and glow tokens (`--fortuna-nav-*`, `--fortuna-hero-*`, `--fortuna-glow`)
+   are deliberately identical in both themes: the navigation rail and the hero
+   panels are always the dark, lit surface, the way a bank's app keeps its
+   header dark above a white page. Only `bg`/`surface` flip. */
+@theme inline {
+  --font-display: "Spectral", Georgia, "Times New Roman", serif;
+  --font-sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+
+  --color-bg: var(--fortuna-bg);
+  --color-surface: var(--fortuna-surface);
+  --color-surface-raised: var(--fortuna-surface-raised);
+  --color-surface-sunken: var(--fortuna-surface-sunken);
+  --color-border: var(--fortuna-border);
+  --color-border-strong: var(--fortuna-border-strong);
+  --color-text: var(--fortuna-text);
+  --color-text-secondary: var(--fortuna-text-secondary);
+  --color-text-muted: var(--fortuna-text-muted);
+  --color-text-inverse: var(--fortuna-text-inverse);
+  --color-brand: var(--fortuna-brand);
+  --color-brand-hover: var(--fortuna-brand-hover);
+  --color-brand-subtle: var(--fortuna-brand-subtle);
+  --color-accent: var(--fortuna-accent);
+  --color-positive: var(--fortuna-positive);
+  --color-positive-bg: var(--fortuna-positive-bg);
+  --color-negative: var(--fortuna-negative);
+  --color-negative-bg: var(--fortuna-negative-bg);
+  --color-warning: var(--fortuna-warning);
+  --color-warning-bg: var(--fortuna-warning-bg);
+  --color-info: var(--fortuna-info);
+  --color-info-bg: var(--fortuna-info-bg);
+  --color-focus: var(--fortuna-focus);
+
+  --color-nav: var(--fortuna-nav);
+  --color-nav-raised: var(--fortuna-nav-raised);
+  --color-nav-border: var(--fortuna-nav-border);
+  --color-nav-text: var(--fortuna-nav-text);
+  --color-nav-muted: var(--fortuna-nav-muted);
+  --color-nav-active: var(--fortuna-nav-active);
+
+  --color-hero: var(--fortuna-hero-to);
+  --color-hero-text: var(--fortuna-hero-text);
+  --color-hero-muted: var(--fortuna-hero-muted);
+  --color-hero-border: var(--fortuna-hero-border);
+  --color-glow: var(--fortuna-glow);
+  --color-glow-soft: var(--fortuna-glow-soft);
+
+  --color-chart-1: var(--fortuna-chart-1);
+  --color-chart-2: var(--fortuna-chart-2);
+  --color-chart-3: var(--fortuna-chart-3);
+  --color-chart-4: var(--fortuna-chart-4);
+  --color-chart-5: var(--fortuna-chart-5);
+  --color-chart-6: var(--fortuna-chart-6);
+  --color-chart-7: var(--fortuna-chart-7);
+  --color-chart-neutral-1: var(--fortuna-chart-neutral-1);
+  --color-chart-neutral-2: var(--fortuna-chart-neutral-2);
+  --color-chart-neutral-3: var(--fortuna-chart-neutral-3);
+  --color-chart-neutral-4: var(--fortuna-chart-neutral-4);
+
+  --radius-sm: 4px;
+  --radius-control: 8px;
+  --radius-md: 12px;
+  --radius-lg: 20px;
+  --shadow-overlay: var(--fortuna-shadow-overlay);
+  --shadow-glow: var(--fortuna-shadow-glow);
+  --shadow-hero: var(--fortuna-shadow-hero);
+}
+
+:root {
+  --fortuna-bg: #F1F4FA;
+  --fortuna-surface: #FFFFFF;
+  --fortuna-surface-raised: #FFFFFF;
+  --fortuna-surface-sunken: #E9EEF8;
+  --fortuna-border: #D8DFEC;
+  --fortuna-border-strong: #AEB9CE;
+  --fortuna-text: #0E1626;
+  --fortuna-text-secondary: #47536B;
+  --fortuna-text-muted: #77839A;
+  --fortuna-text-inverse: #FFFFFF;
+  --fortuna-brand: #0018A8;
+  --fortuna-brand-hover: #00126F;
+  --fortuna-brand-subtle: #E1EAFB;
+  --fortuna-accent: #0A50D0;
+  --fortuna-positive: #0B7550;
+  --fortuna-positive-bg: #E6F4EE;
+  --fortuna-negative: #B52318;
+  --fortuna-negative-bg: #FCEBE7;
+  --fortuna-warning: #8A5A00;
+  --fortuna-warning-bg: #FBF1E0;
+  --fortuna-info: #0A4E9B;
+  --fortuna-info-bg: #E7F0FC;
+  --fortuna-focus: #0A50D0;
+  --fortuna-chart-1: #0018A8;
+  --fortuna-chart-2: #0A50D0;
+  --fortuna-chart-3: #4C8DFF;
+  --fortuna-chart-4: #0B7A8C;
+  --fortuna-chart-5: #9CC0FF;
+  --fortuna-chart-6: #5B6B8C;
+  --fortuna-chart-7: #9AA8C4;
+  --fortuna-chart-neutral-1: #EDF1F8;
+  --fortuna-chart-neutral-2: #DBE2EF;
+  --fortuna-chart-neutral-3: #C1CADC;
+  --fortuna-chart-neutral-4: #97A2B8;
+  --fortuna-shadow-overlay: 0 18px 44px rgba(14, 22, 38, 0.18);
+  color-scheme: light;
+}
+
+.dark {
+  --fortuna-bg: #050A1C;
+  --fortuna-surface: #0C1330;
+  --fortuna-surface-raised: #111A40;
+  --fortuna-surface-sunken: #080E28;
+  --fortuna-border: #1D2A58;
+  --fortuna-border-strong: #2F4078;
+  --fortuna-text: #EAEEFA;
+  --fortuna-text-secondary: #B2BEDC;
+  --fortuna-text-muted: #838FB0;
+  --fortuna-text-inverse: #050A1C;
+  --fortuna-brand: #6C9BFF;
+  --fortuna-brand-hover: #8FB4FF;
+  --fortuna-brand-subtle: #12214F;
+  --fortuna-accent: #4C8DFF;
+  --fortuna-positive: #3FC486;
+  --fortuna-positive-bg: #08261F;
+  --fortuna-negative: #FF6152;
+  --fortuna-negative-bg: #2B1519;
+  --fortuna-warning: #E3B341;
+  --fortuna-warning-bg: #241D10;
+  --fortuna-info: #7FB2FF;
+  --fortuna-info-bg: #0E1C44;
+  --fortuna-focus: #6C9BFF;
+  --fortuna-chart-1: #6C9BFF;
+  --fortuna-chart-2: #4C8DFF;
+  --fortuna-chart-3: #9CC0FF;
+  --fortuna-chart-4: #37C9C0;
+  --fortuna-chart-5: #C8D8FF;
+  --fortuna-chart-6: #8590B0;
+  --fortuna-chart-7: #5B6B8C;
+  --fortuna-chart-neutral-1: #111A40;
+  --fortuna-chart-neutral-2: #1D2A58;
+  --fortuna-chart-neutral-3: #2F4078;
+  --fortuna-chart-neutral-4: #4E5C8C;
+  --fortuna-shadow-overlay: 0 18px 44px rgba(0, 0, 0, 0.6);
+  color-scheme: dark;
+}
+
+/* Always-dark surfaces: the navigation rail and every hero panel. */
+:root,
+.dark {
+  --fortuna-nav: #08112E;
+  --fortuna-nav-raised: #0F1B46;
+  --fortuna-nav-border: #1E2F68;
+  --fortuna-nav-text: #C2D3F4;
+  --fortuna-nav-muted: #8398C9;
+  --fortuna-nav-active: #FFFFFF;
+
+  --fortuna-hero-from: #04091F;
+  --fortuna-hero-via: #0A1742;
+  --fortuna-hero-to: #10328A;
+  --fortuna-hero-text: #FFFFFF;
+  --fortuna-hero-muted: #A3B8EC;
+  --fortuna-hero-border: #24397E;
+  --fortuna-glow: #4C8DFF;
+  --fortuna-glow-soft: #0B3FD0;
+  --fortuna-shadow-glow: 0 0 0 1px rgba(76, 141, 255, 0.24), 0 12px 40px -12px rgba(11, 63, 208, 0.8);
+  --fortuna-shadow-hero: 0 24px 60px -28px rgba(6, 10, 34, 0.85);
+}
+
+@layer base {
+  * {
+    border-color: var(--fortuna-border);
+  }
+  html {
+    font-family: var(--font-sans);
+    background: var(--fortuna-bg);
+    color: var(--fortuna-text);
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
+  body {
+    font-size: 14px;
+    line-height: 1.5;
+  }
+  ::selection {
+    background: var(--fortuna-brand-subtle);
+  }
+  :focus-visible {
+    outline: 2px solid var(--fortuna-focus);
+    outline-offset: 2px;
+  }
+  h1, h2, h3 {
+    letter-spacing: -0.01em;
+  }
+  /* No double-tap zoom delay on anything that takes a tap. */
+  a, button, input, select, textarea, label, summary, [role="button"] {
+    touch-action: manipulation;
+  }
+  /* A finger needs a larger box than the browser's 13 px default. */
+  @media (pointer: coarse) {
+    input[type="checkbox"],
+    input[type="radio"] {
+      inline-size: 1.25rem;
+      block-size: 1.25rem;
+    }
+  }
+}
+
+/* The phone shell's fixed bars, for anything that has to clear them: the
+   page's bottom padding, the phone menu, toasts, a full-height chat. Both are
+   0 where the rail replaces them, and the tab bar steps aside while the
+   keyboard is up (`data-keyboard`, set by `useViewportVars`). */
+:root {
+  --phone-header-h: calc(env(safe-area-inset-top) + 49px);
+  /* The long name, read by the sticky filter bar on /transactions. */
+  --phone-header-height: var(--phone-header-h);
+  --phone-tabbar-h: calc(57px + env(safe-area-inset-bottom));
+}
+:root[data-keyboard="open"] {
+  --phone-tabbar-h: 0px;
+}
+@media (min-width: 64rem) {
+  :root {
+    --phone-header-h: 0px;
+    --phone-tabbar-h: 0px;
+  }
+}
+
+/* Dialogs: a short fade and lift on desktop, a sheet rising from the bottom
+   edge on a phone. `backwards`, not `both`: a held final keyframe would pin
+   the transform (see the ring trap in AGENTS.md). Tailwind's translate
+   utilities use the separate `translate` property, so centring survives. */
+@keyframes fortuna-fade-in {
+  from { opacity: 0; }
+}
+@keyframes fortuna-dialog-pop {
+  from { opacity: 0; transform: scale(0.97); }
+}
+@keyframes fortuna-sheet-up {
+  from { transform: translateY(100%); }
+}
+@utility fortuna-overlay-in {
+  animation: fortuna-fade-in 160ms ease-out backwards;
+}
+@utility fortuna-dialog-in {
+  animation: fortuna-dialog-pop 180ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+@utility fortuna-sheet-in {
+  animation: fortuna-sheet-up 280ms cubic-bezier(0.22, 1, 0.36, 1) backwards;
+}
+
+@utility amount {
+  font-variant-numeric: tabular-nums lining-nums;
+  letter-spacing: -0.015em;
+  white-space: nowrap;
+}
+@utility label-caps {
+  font-size: 11px;
+  font-weight: 500;
+  letter-spacing: 0.13em;
+  text-transform: uppercase;
+  color: var(--fortuna-text-muted);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+/* Safari reserves room for a localized date plus its picker button. Letting
+   date controls shrink like text inputs cuts off the year or calendar icon. */
+input[type="date"] {
+  min-inline-size: 10.5rem;
+}
+input[type="date"]::-webkit-date-and-time-value {
+  min-height: 1.25rem;
+  text-align: left;
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  flex: 0 0 auto;
+  margin: 0;
+}
+@utility surface {
+  background: var(--fortuna-surface);
+  border: 1px solid var(--fortuna-border);
+  border-radius: var(--radius-md);
+}
+
+/* The lit navy panel. `hero-panel` paints the gradient and the rim; the
+   drifting blooms are separate elements so they can be blurred and animated
+   without blurring the content that sits on top. */
+@utility hero-panel {
+  position: relative;
+  isolation: isolate;
+  overflow: hidden;
+  border-radius: var(--radius-lg);
+  border: 1px solid var(--fortuna-hero-border);
+  color: var(--fortuna-hero-text);
+  background:
+    radial-gradient(120% 90% at 50% 120%, var(--fortuna-hero-to) 0%, transparent 70%),
+    linear-gradient(160deg, var(--fortuna-hero-via) 0%, var(--fortuna-hero-from) 100%);
+  box-shadow: var(--fortuna-shadow-hero);
+}
+
+@utility nav-surface {
+  background: var(--fortuna-nav);
+  color: var(--fortuna-nav-text);
+}
+
+/* A subtree drawn on the always-dark navy re-points the semantic colour
+   tokens at their navy equivalents. Components built for a page surface —
+   the version chip, the theme toggle, badges, buttons — then keep their
+   contrast on the rail and in a hero without needing an "on dark" variant. */
+@utility on-navy {
+  --fortuna-surface: var(--fortuna-nav-raised);
+  --fortuna-surface-raised: #152258;
+  --fortuna-surface-sunken: #121E52;
+  --fortuna-border: var(--fortuna-nav-border);
+  --fortuna-border-strong: #33499B;
+  --fortuna-text: var(--fortuna-nav-active);
+  --fortuna-text-secondary: var(--fortuna-nav-text);
+  --fortuna-text-muted: var(--fortuna-nav-muted);
+  --fortuna-text-inverse: var(--fortuna-nav);
+  --fortuna-brand: var(--fortuna-glow);
+  --fortuna-brand-hover: #7FAcFF;
+  --fortuna-brand-subtle: #152663;
+  --fortuna-focus: var(--fortuna-glow);
+  --fortuna-positive: #3FC486;
+  --fortuna-positive-bg: #0D2D33;
+  --fortuna-negative: #FF6152;
+  --fortuna-negative-bg: #331A1C;
+  --fortuna-warning: #E3B341;
+  --fortuna-warning-bg: #2A2313;
+  --fortuna-info: #7FB2FF;
+  --fortuna-info-bg: #122356;
+}
+
+@keyframes fortuna-drift {
+  0%, 100% { transform: translate3d(0, 0, 0) scale(1); opacity: 0.75; }
+  50% { transform: translate3d(4%, -6%, 0) scale(1.12); opacity: 1; }
+}
+@keyframes fortuna-breathe {
+  0%, 100% { opacity: 0.55; }
+  50% { opacity: 1; }
+}
+
+/* Ring choreography. The marker runs one full lap, then settles on the ratio
+   while the arc fills in behind it. Both keyframe sets share the 60% split
+   and the settle easing, so the arc can never run ahead of the dot. */
+@keyframes fortuna-marker-lap {
+  0% { transform: rotate(0deg); animation-timing-function: linear; }
+  60% { transform: rotate(360deg); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+  100% { transform: rotate(var(--marker-to, 0deg)); }
+}
+/* A tick flares as the dot passes it, then drops back to its rest level. */
+@keyframes fortuna-tick-pass {
+  0%, 100% { opacity: var(--tick-rest, 0.28); }
+  15% { opacity: 1; }
+}
+/* On the settle pass the ticks inside the ratio stay lit. */
+@keyframes fortuna-tick-lit {
+  from { opacity: var(--tick-rest, 0.28); }
+  to { opacity: 0.95; }
+}
+/* The lock-in: a ring of light leaves the gauge as the dot settles. */
+@keyframes fortuna-ping {
+  from { transform: scale(1); opacity: 0.75; }
+  to { transform: scale(1.24); opacity: 0; }
+}
+@keyframes fortuna-trail-out {
+  to { opacity: 0; }
+}
+@keyframes fortuna-backlight {
+  0% { opacity: 0.1; }
+  75% { opacity: 0.55; }
+  100% { opacity: 0.3; }
+}
+@keyframes fortuna-figure-glow {
+  0%, 100% { text-shadow: 0 0 0 transparent; }
+  30% { text-shadow: 0 0 28px var(--fortuna-glow); }
+}
+@keyframes fortuna-sweep-lap {
+  0%, 60% { stroke-dashoffset: var(--sweep-from); animation-timing-function: cubic-bezier(0.22, 1, 0.36, 1); }
+  100% { stroke-dashoffset: var(--sweep-to); }
+}
+@keyframes fortuna-ring-in {
+  from { opacity: 0; transform: scale(0.9); }
+  to { opacity: 1; transform: scale(1); }
+}
+@keyframes fortuna-rise {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: none; }
+}
+/* A single specular pass across a hero when it enters. */
+@keyframes fortuna-sheen {
+  from { transform: translateX(-140%) skewX(-18deg); }
+  to { transform: translateX(340%) skewX(-18deg); }
+}
+
+@layer components {
+  /* Children rise in one after another: stats, then the quick actions.
+     `backwards`, not `both`: a held final keyframe pins opacity at 1, and a
+     disabled quick action (`disabled:opacity-50`) would never look disabled. */
+  .hero-stagger > * {
+    animation: fortuna-rise 0.7s cubic-bezier(0.22, 1, 0.36, 1) backwards;
+  }
+  .hero-stagger > *:nth-child(2) { animation-delay: 90ms; }
+  .hero-stagger > *:nth-child(3) { animation-delay: 180ms; }
+  .hero-stagger > *:nth-child(4) { animation-delay: 270ms; }
+  .hero-stagger > *:nth-child(5) { animation-delay: 360ms; }
+  .hero-stagger > *:nth-child(6) { animation-delay: 450ms; }
+}
+
+/* Page changes crossfade. The navigation rail carries its own name, so it
+   holds still while the page beside it changes. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation-duration: 240ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-delay: 0s !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+  }
+  ::view-transition-group(*),
+  ::view-transition-old(*),
+  ::view-transition-new(*) {
+    animation: none !important;
+  }
+}

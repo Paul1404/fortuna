@@ -1,0 +1,206 @@
+{
+  "$schema": "https://design-tokens.org/draft",
+  "name": "Fortuna",
+  "version": "1.0.0",
+  "color": {
+    "light": {
+      "bg": "#F1F4FA",
+      "surface": "#FFFFFF",
+      "surface-raised": "#FFFFFF",
+      "surface-sunken": "#E9EEF8",
+      "border": "#D8DFEC",
+      "border-strong": "#AEB9CE",
+      "text": "#0E1626",
+      "text-secondary": "#47536B",
+      "text-muted": "#77839A",
+      "text-inverse": "#FFFFFF",
+      "brand": "#0018A8",
+      "brand-hover": "#00126F",
+      "brand-subtle": "#E1EAFB",
+      "accent": "#0A50D0",
+      "positive": "#0B7550",
+      "positive-bg": "#E6F4EE",
+      "negative": "#B52318",
+      "negative-bg": "#FCEBE7",
+      "warning": "#8A5A00",
+      "warning-bg": "#FBF1E0",
+      "info": "#0A4E9B",
+      "info-bg": "#E7F0FC",
+      "focus": "#0A50D0"
+    },
+    "dark": {
+      "bg": "#050A1C",
+      "surface": "#0C1330",
+      "surface-raised": "#111A40",
+      "surface-sunken": "#080E28",
+      "border": "#1D2A58",
+      "border-strong": "#2F4078",
+      "text": "#EAEEFA",
+      "text-secondary": "#B2BEDC",
+      "text-muted": "#838FB0",
+      "text-inverse": "#050A1C",
+      "brand": "#6C9BFF",
+      "brand-hover": "#8FB4FF",
+      "brand-subtle": "#12214F",
+      "accent": "#4C8DFF",
+      "positive": "#3FC486",
+      "positive-bg": "#08261F",
+      "negative": "#FF6152",
+      "negative-bg": "#2B1519",
+      "warning": "#E3B341",
+      "warning-bg": "#241D10",
+      "info": "#7FB2FF",
+      "info-bg": "#0E1C44",
+      "focus": "#6C9BFF"
+    },
+    "chart": {
+      "series": [
+        "#0018A8",
+        "#0A50D0",
+        "#4C8DFF",
+        "#0B7A8C",
+        "#9CC0FF",
+        "#5B6B8C",
+        "#9AA8C4"
+      ],
+      "seriesDark": [
+        "#6C9BFF",
+        "#4C8DFF",
+        "#9CC0FF",
+        "#37C9C0",
+        "#C8D8FF",
+        "#8590B0",
+        "#5B6B8C"
+      ],
+      "neutral": [
+        "#EDF1F8",
+        "#DBE2EF",
+        "#C1CADC",
+        "#97A2B8"
+      ]
+    },
+    "navy": {
+      "nav": "#08112E",
+      "nav-raised": "#0F1B46",
+      "nav-border": "#1E2F68",
+      "nav-text": "#C2D3F4",
+      "nav-muted": "#8398C9",
+      "nav-active": "#FFFFFF",
+      "hero-from": "#04091F",
+      "hero-via": "#0A1742",
+      "hero-to": "#10328A",
+      "hero-text": "#FFFFFF",
+      "hero-muted": "#A3B8EC",
+      "hero-border": "#24397E",
+      "glow": "#4C8DFF",
+      "glow-soft": "#0B3FD0"
+    }
+  },
+  "typography": {
+    "families": {
+      "display": "Spectral",
+      "sans": "Instrument Sans",
+      "mono": "IBM Plex Mono"
+    },
+    "numeric": {
+      "fontVariantNumeric": "tabular-nums lining-nums",
+      "displayLetterSpacing": "-0.015em"
+    },
+    "scale": {
+      "display": {
+        "font": "Spectral",
+        "weight": 300,
+        "size": 44,
+        "lineHeight": 1.1,
+        "letterSpacing": "-0.015em"
+      },
+      "title": {
+        "font": "Spectral",
+        "weight": 400,
+        "size": 30,
+        "lineHeight": 1.2,
+        "letterSpacing": "-0.01em"
+      },
+      "h1": {
+        "font": "Instrument Sans",
+        "weight": 600,
+        "size": 20,
+        "lineHeight": 1.3
+      },
+      "h2": {
+        "font": "Instrument Sans",
+        "weight": 600,
+        "size": 15,
+        "lineHeight": 1.4
+      },
+      "body": {
+        "font": "Instrument Sans",
+        "weight": 400,
+        "size": 14,
+        "lineHeight": 1.7
+      },
+      "caption": {
+        "font": "Instrument Sans",
+        "weight": 400,
+        "size": 12,
+        "lineHeight": 1.5
+      },
+      "label": {
+        "font": "Instrument Sans",
+        "weight": 500,
+        "size": 11,
+        "letterSpacing": "0.13em",
+        "textTransform": "uppercase"
+      },
+      "mono": {
+        "font": "IBM Plex Mono",
+        "weight": 400,
+        "size": 12
+      },
+      "amountDisplay": {
+        "font": "Instrument Sans",
+        "weight": 600,
+        "size": 56,
+        "letterSpacing": "-0.02em"
+      },
+      "amountLarge": {
+        "font": "Instrument Sans",
+        "weight": 600,
+        "size": 23,
+        "letterSpacing": "-0.015em"
+      },
+      "amountSmall": {
+        "font": "Instrument Sans",
+        "weight": 600,
+        "size": 13.5
+      }
+    }
+  },
+  "space": {
+    "0": "0px",
+    "1": "4px",
+    "2": "8px",
+    "3": "12px",
+    "4": "16px",
+    "6": "24px",
+    "8": "32px",
+    "12": "48px",
+    "16": "64px"
+  },
+  "radius": {
+    "none": 0,
+    "sm": 2,
+    "md": 8,
+    "icon": "22.6%"
+  },
+  "border": {
+    "width": 1
+  },
+  "logo": {
+    "grid": 66,
+    "strokeWidth": 10,
+    "faviconStrokeWidth": 11,
+    "clearSpace": "1.5 × stroke",
+    "minSize": 16
+  }
+}

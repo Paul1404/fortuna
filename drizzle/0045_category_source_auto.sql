@@ -1,0 +1,1 @@
+ALTER TYPE "public"."category_source" ADD VALUE 'auto';

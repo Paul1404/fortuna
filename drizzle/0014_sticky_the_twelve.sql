@@ -1,0 +1,1 @@
+ALTER TABLE "investment_policies" ADD COLUMN "max_debt_rate_bps" integer DEFAULT 600 NOT NULL;

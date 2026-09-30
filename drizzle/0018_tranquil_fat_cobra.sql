@@ -1,0 +1,1 @@
+ALTER TABLE "investment_source_transactions" ADD COLUMN "source_fingerprint" text NOT NULL;

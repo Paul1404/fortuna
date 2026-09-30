@@ -1,0 +1,13 @@
+/node_modules
+/.output
+/dist
+/coverage
+/test-results
+*.tsbuildinfo
+.DS_Store
+*.log
+.env*
+!.env.example
+/.db-backup/
+.claude/
+.codex/

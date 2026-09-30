@@ -1,0 +1,1 @@
+ALTER TABLE "investment_source_accounts" ADD COLUMN "crypto_value_minor" bigint;

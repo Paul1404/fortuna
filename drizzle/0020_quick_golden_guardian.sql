@@ -1,0 +1,1 @@
+ALTER TABLE "external_connections" ADD COLUMN "last_attempted_sync_at" timestamp with time zone;

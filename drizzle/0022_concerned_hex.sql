@@ -1,0 +1,1 @@
+ALTER TABLE "copilot_threads" ADD COLUMN "toolset_version" integer DEFAULT 1 NOT NULL;

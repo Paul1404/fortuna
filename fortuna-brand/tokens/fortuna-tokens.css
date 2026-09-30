@@ -1,0 +1,166 @@
+/* Fortuna design tokens — v1.0
+   Light is the default theme; [data-theme="dark"] or prefers-color-scheme flips it. */
+:root {
+  --fortuna-bg: #F1F4FA;
+  --fortuna-surface: #FFFFFF;
+  --fortuna-surface-raised: #FFFFFF;
+  --fortuna-surface-sunken: #E9EEF8;
+  --fortuna-border: #D8DFEC;
+  --fortuna-border-strong: #AEB9CE;
+  --fortuna-text: #0E1626;
+  --fortuna-text-secondary: #47536B;
+  --fortuna-text-muted: #77839A;
+  --fortuna-text-inverse: #FFFFFF;
+  --fortuna-brand: #0018A8;
+  --fortuna-brand-hover: #00126F;
+  --fortuna-brand-subtle: #E1EAFB;
+  --fortuna-accent: #0A50D0;
+  --fortuna-positive: #0B7550;
+  --fortuna-positive-bg: #E6F4EE;
+  --fortuna-negative: #B52318;
+  --fortuna-negative-bg: #FCEBE7;
+  --fortuna-warning: #8A5A00;
+  --fortuna-warning-bg: #FBF1E0;
+  --fortuna-info: #0A4E9B;
+  --fortuna-info-bg: #E7F0FC;
+  --fortuna-focus: #0A50D0;
+
+  /* chart */
+  --fortuna-chart-1: #0018A8;
+  --fortuna-chart-2: #0A50D0;
+  --fortuna-chart-3: #4C8DFF;
+  --fortuna-chart-4: #0B7A8C;
+  --fortuna-chart-5: #9CC0FF;
+  --fortuna-chart-6: #5B6B8C;
+  --fortuna-chart-7: #9AA8C4;
+  --fortuna-chart-neutral-1: #EDF1F8;
+  --fortuna-chart-neutral-2: #DBE2EF;
+  --fortuna-chart-neutral-3: #C1CADC;
+  --fortuna-chart-neutral-4: #97A2B8;
+
+  /* type */
+  --fortuna-font-display: "Spectral", Georgia, "Times New Roman", serif;
+  --fortuna-font-sans: "Instrument Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --fortuna-font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", monospace;
+  --fortuna-numeric: tabular-nums lining-nums;
+
+  --fortuna-text-display: 300 44px/1.1 var(--fortuna-font-display);
+  --fortuna-text-title: 400 30px/1.2 var(--fortuna-font-display);
+  --fortuna-text-h1: 600 20px/1.3 var(--fortuna-font-sans);
+  --fortuna-text-h2: 600 15px/1.4 var(--fortuna-font-sans);
+  --fortuna-text-body: 400 14px/1.7 var(--fortuna-font-sans);
+  --fortuna-text-caption: 400 12px/1.5 var(--fortuna-font-sans);
+  --fortuna-text-label: 500 11px/1 var(--fortuna-font-sans);
+  --fortuna-label-tracking: 0.13em;
+  --fortuna-amount-display: 600 56px/1.05 var(--fortuna-font-sans);
+  --fortuna-amount-lg: 600 23px/1.2 var(--fortuna-font-sans);
+  --fortuna-amount-sm: 600 13.5px/1.2 var(--fortuna-font-sans);
+
+  /* space + shape */
+  --fortuna-space-0: 0px;
+  --fortuna-space-1: 4px;
+  --fortuna-space-2: 8px;
+  --fortuna-space-3: 12px;
+  --fortuna-space-4: 16px;
+  --fortuna-space-6: 24px;
+  --fortuna-space-8: 32px;
+  --fortuna-space-12: 48px;
+  --fortuna-space-16: 64px;
+  --fortuna-radius-none: 0px;
+  --fortuna-radius-sm: 4px;
+  --fortuna-radius-control: 8px;
+  --fortuna-radius-md: 12px;
+  --fortuna-radius-lg: 20px;
+  --fortuna-radius-icon: 22.6%;
+  --fortuna-border-width: 1px;
+  --fortuna-shadow-overlay: 0 18px 44px rgba(14, 22, 38, 0.18);
+  --fortuna-max-content: 1240px;
+
+  /* always-dark surfaces: the navigation rail and every hero panel keep
+     these values in both themes */
+  --fortuna-nav: #08112E;
+  --fortuna-nav-raised: #0F1B46;
+  --fortuna-nav-border: #1E2F68;
+  --fortuna-nav-text: #C2D3F4;
+  --fortuna-nav-muted: #8398C9;
+  --fortuna-nav-active: #FFFFFF;
+  --fortuna-hero-from: #04091F;
+  --fortuna-hero-via: #0A1742;
+  --fortuna-hero-to: #10328A;
+  --fortuna-hero-text: #FFFFFF;
+  --fortuna-hero-muted: #A3B8EC;
+  --fortuna-hero-border: #24397E;
+  --fortuna-glow: #4C8DFF;
+  --fortuna-glow-soft: #0B3FD0;
+  --fortuna-shadow-glow: 0 0 0 1px rgba(76, 141, 255, 0.24), 0 12px 40px -12px rgba(11, 63, 208, 0.8);
+  --fortuna-shadow-hero: 0 24px 60px -28px rgba(6, 10, 34, 0.85);
+}
+
+[data-theme="dark"] {
+  --fortuna-bg: #050A1C;
+  --fortuna-surface: #0C1330;
+  --fortuna-surface-raised: #111A40;
+  --fortuna-surface-sunken: #080E28;
+  --fortuna-border: #1D2A58;
+  --fortuna-border-strong: #2F4078;
+  --fortuna-text: #EAEEFA;
+  --fortuna-text-secondary: #B2BEDC;
+  --fortuna-text-muted: #838FB0;
+  --fortuna-text-inverse: #050A1C;
+  --fortuna-brand: #6C9BFF;
+  --fortuna-brand-hover: #8FB4FF;
+  --fortuna-brand-subtle: #12214F;
+  --fortuna-accent: #4C8DFF;
+  --fortuna-positive: #3FC486;
+  --fortuna-positive-bg: #08261F;
+  --fortuna-negative: #FF6152;
+  --fortuna-negative-bg: #2B1519;
+  --fortuna-warning: #E3B341;
+  --fortuna-warning-bg: #241D10;
+  --fortuna-info: #7FB2FF;
+  --fortuna-info-bg: #0E1C44;
+  --fortuna-focus: #6C9BFF;
+  --fortuna-chart-1: #6C9BFF;
+  --fortuna-chart-2: #4C8DFF;
+  --fortuna-chart-3: #9CC0FF;
+  --fortuna-chart-4: #37C9C0;
+  --fortuna-chart-5: #C8D8FF;
+  --fortuna-chart-6: #8590B0;
+  --fortuna-chart-7: #5B6B8C;
+  --fortuna-chart-neutral-1: #111A40;
+  --fortuna-chart-neutral-2: #1D2A58;
+  --fortuna-chart-neutral-3: #2F4078;
+  --fortuna-chart-neutral-4: #4E5C8C;
+  --fortuna-shadow-overlay: 0 18px 44px rgba(0, 0, 0, 0.6);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --fortuna-bg: #050A1C;
+    --fortuna-surface: #0C1330;
+    --fortuna-surface-raised: #111A40;
+    --fortuna-surface-sunken: #080E28;
+    --fortuna-border: #1D2A58;
+    --fortuna-border-strong: #2F4078;
+    --fortuna-text: #EAEEFA;
+    --fortuna-text-secondary: #B2BEDC;
+    --fortuna-text-muted: #838FB0;
+    --fortuna-text-inverse: #050A1C;
+    --fortuna-brand: #6C9BFF;
+    --fortuna-brand-hover: #8FB4FF;
+    --fortuna-brand-subtle: #12214F;
+    --fortuna-accent: #4C8DFF;
+    --fortuna-positive: #3FC486;
+    --fortuna-positive-bg: #08261F;
+    --fortuna-negative: #FF6152;
+    --fortuna-negative-bg: #2B1519;
+    --fortuna-warning: #E3B341;
+    --fortuna-warning-bg: #241D10;
+    --fortuna-info: #7FB2FF;
+    --fortuna-info-bg: #0E1C44;
+    --fortuna-focus: #6C9BFF;
+  }
+}
+
+.fortuna-amount { font-variant-numeric: var(--fortuna-numeric); letter-spacing: -0.015em; }
+.fortuna-label { font: var(--fortuna-text-label); letter-spacing: var(--fortuna-label-tracking); text-transform: uppercase; color: var(--fortuna-text-muted); }

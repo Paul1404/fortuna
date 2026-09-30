@@ -1,0 +1,1 @@
+ALTER TYPE "public"."connection_status" ADD VALUE 'pending' BEFORE 'active';

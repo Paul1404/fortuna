@@ -1,0 +1,1 @@
+ALTER TABLE "financial_profiles" ADD COLUMN "currency" text DEFAULT 'EUR' NOT NULL;

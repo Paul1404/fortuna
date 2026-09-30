@@ -1,0 +1,1 @@
+ALTER TABLE "optimizations" ADD COLUMN "saving_from" date;

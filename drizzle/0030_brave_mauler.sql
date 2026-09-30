@@ -1,0 +1,1 @@
+ALTER TABLE "categorization_rules" DROP COLUMN "mark_as_transfer";

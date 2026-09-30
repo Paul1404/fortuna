@@ -1,0 +1,1 @@
+ALTER TABLE "bank_connections" ADD COLUMN "institution_country" text DEFAULT 'DE' NOT NULL;

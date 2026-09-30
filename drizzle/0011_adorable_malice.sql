@@ -1,0 +1,1 @@
+ALTER TABLE "contract_documents" RENAME COLUMN "extracted_text" TO "encrypted_extracted_text";

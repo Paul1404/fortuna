@@ -1,0 +1,37 @@
+# Hr. Körner: architecture note
+
+## Existing architecture and boundaries
+
+Fortuna already has a single Copilot, Herr Konrad Körner, backed by the pinned Codex App Server. It uses a compact financial snapshot and validated, user-scoped dynamic tools. Chat history is browser-local; user-confirmed durable context lives in `copilot_memories`. Session-only oRPC mutations cannot be called through Fortuna's read-only MCP. The domain services and PostgreSQL models for accounts, transactions, recurring payments, budgets, assets, liabilities, securities and net worth are already established. `insights.ts` reports data quality, but there is no persistent observation model, notification queue, or background scheduler.
+
+## Implemented extension
+
+This release extends that Copilot instead of creating another AI stack. `financial_profiles` holds explicit owner goals, the cash floor, purchase threshold, merchant multiplier, ignored categories and alert sensitivity. Each monetary preference stores its currency; comparisons pause if it differs from the current base currency. Since 0.59.0 the goal, savings rate, reserve months and target split live here too, and `investment_policies` is no longer read; the reserve every part of Fortuna uses is `requiredReserve` in `src/domain/reserve.ts`. A pure analyzer in `src/domain/hr-koerner.ts` turns bounded, user-scoped data into observation candidates. `financial_observations` stores the finding, numeric evidence, source references, confidence, period, impact, owner status and timestamps. `financial_review_runs` tracks review freshness and a sanitized error class.
+
+The service reconciles candidates by a user-scoped deterministic key. Repeated reviews update an open finding rather than creating duplicates. An intentional or dismissed finding remains suppressed; snoozed findings return only after the snooze deadline. No valuation is invented where one is missing. The authenticated app runs a due review on visit, at most once per six hours unless the owner presses **Jetzt prüfen**. New bank data and a changed completed Scalable sync timestamp trigger a follow-up review. The navigation dot marks open review/urgent findings. The weekly report computes seven-day booked cashflow, net worth change where a comparison exists, cash and the top findings. It is generated on request, not emailed. A goal card shows the remaining amount and a simple month count at the explicitly stated savings rate; it is not a return forecast.
+
+Copilot's existing snapshot now includes the explicit profile and up to five current findings. New typed read tools expose the full profile, a bounded observation list, report, sanitized accounts and transactions, recurring payments, budgets, assets, liabilities, investments, net worth, cashflow and forecast. Broker activity stays separate from bank cashflow. A typed purchase-impact tool accepts a stated amount and currency, then returns cash-after-purchase, reserve shortfall and a goal-delay estimate when the inputs permit it. It does not assert that a purchased watch or vehicle has no resale value. The new toolset version starts a fresh App Server thread because `thread/resume` cannot install new dynamic tools. The browser-local visible conversation history remains available as recovery context. The LLM may explain or compare; it may not invent evidence or recalculate deterministic amounts. The [Codex App Server documentation](https://learn.chatgpt.com/docs/app-server) describes the underlying thread and tool model.
+
+## Deterministic findings in this release
+
+- **Liquidity below floor:** cash compared with an explicitly entered reserve, in the same currency.
+- **Unusual merchant spend:** a booked outflow in the last 14 days compared with the median of at least three earlier same-merchant outflows in a 90-day window. Transfers, ignored categories and other currencies are excluded. This does not claim fraud, ownership or lack of intent.
+- **Small recurring costs:** at least three active small subscriptions totaling 3,000 minor units in the base currency per month are annualized. Annual cost is context, not a claimed cancellation saving. Payment history does not establish actual usage.
+- **Upcoming payment and reserve:** a large expected outflow due in seven days would push cash below the explicitly configured reserve. Expected dates and amounts remain forecasts, not booked transactions.
+- **Stale valuation:** an active asset with missing or old valuation date. Detailed sensitivity begins at 15 days; balanced at 31 days. No new market value is inferred.
+
+Quiet sensitivity shows only review and urgent findings. Other findings remain deterministic and inspectable in the records. The profile starts with no financial goals; defaults are not presented as the owner's choices.
+
+## Safety and delivery
+
+All money remains integer minor units and currency-specific. Cross-currency merchant/recurring comparisons are omitted rather than guessed. Observations include evidence, source IDs, period, confidence, impact and a clear reason. Missing usage signals cannot prove a subscription is unused; missing inventory cannot prove product ownership. The delivery contract names `in_app`, `push`, `email` and `voice`, but only `in_app` has an adapter. The in-app indicator appears only for open review/urgent findings. Push, email and voice are future adapters, not implied current capabilities. Dismiss, snooze and mark-intentional affect observations only; no order, payment, cancellation, transfer or external commitment is executed. A future channel adapter must re-check severity, suppression and explicit user notification preferences before delivery. Review on authenticated visits is near-real-time for imported data, but not an unattended daily background job.
+
+Goal delay is a deliberately simple estimate: `ceil(purchase_minor * 30.4375 / stated_monthly_savings_minor)` days. It is unavailable without a positive, explicitly stated monthly savings rate. It excludes investment returns, interest, taxes and changes in future savings. The current UI explains the method; automatic goal-delay alerts are not generated without a documented discretionary-purchase signal.
+
+## Current limitations
+
+There is no proof of purchased-item inventory, subscription usage, benefit overlap, insurance duplication, or vendor-specific fair prices. Hr. Körner does not say "you already own shoes" unless such ownership has been separately recorded and linked in a future implementation. No daily background job, outbound notification, phone call or push permission exists. The in-app review does not initiate cancellations or financial transactions. Merchant outliers use same-currency history only; no cross-currency merchant comparison is made. Portfolio-concentration and product-cost analysis remain in the existing investment policy workflow and have not been promoted to persistent observations yet. Goal trajectory and counterfactual purchase comparisons are not financial forecasts. The report does not infer investment performance from net worth movement.
+
+## Verification target
+
+Pure analyzer tests cover thresholds, annualization, estimates and suppression. Service tests cover idempotence, owner overrides, cooldown and authentication scope where an isolated PostgreSQL instance is available. Browser verification must exercise an authenticated owner session. A passing build or public health endpoint alone does not prove that workflow.
