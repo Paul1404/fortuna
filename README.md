@@ -30,8 +30,6 @@ while the browser request still passes through the session-only mutation
 boundary. Deletes, external side effects and bank payments are not exposed. Its renewable authentication state is encrypted in
 `external_connections`; raw tokens never reach the browser or application logs.
 
-## Stack
-
 ## Current application screens
 
 These are real captures of Fortuna 0.62.1 from an isolated local database seeded
