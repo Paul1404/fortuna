@@ -32,18 +32,42 @@ boundary. Deletes, external side effects and bank payments are not exposed. Its 
 
 ## Current application screens
 
-These are real captures of Fortuna 0.62.1 from an isolated local database seeded
+These are real captures of Fortuna 0.62.2 from an isolated local database seeded
 with fictional financial data totalling EUR 65,000 in net worth. They do not show the author's balances, accounts,
 assets, transactions, or investment performance. No bank or broker was connected.
 The older images under `fortuna-brand/mockups` are design concepts, not these
 screens. See [the publication boundary](docs/publication.md).
 
-The screenshot scenario is reproducible with `bun run db:seed:preview` in a
-fresh local `fortuna_demo_*` database. See [the preview setup](docs/screenshot-preview.md).
+The scenario is reproducible with `bun run db:seed:preview` in a fresh local
+`fortuna_demo_*` database, and `bun run screenshots` captures these images from
+it. See [the preview setup](docs/screenshot-preview.md).
 
-![Fortuna's current financial desk with fictional demo data](docs/screenshots/desk.png)
+The desk: net worth, the month in three sentences and what is worth doing today.
 
-![Fortuna's current net-worth view with fictional demo data](docs/screenshots/net-worth.png)
+![Fortuna's desk with fictional demo data](docs/screenshots/desk.png)
+
+The same desk in the dark theme.
+
+![Fortuna's desk in the dark theme with fictional demo data](docs/screenshots/desk-dark.png)
+
+Net worth over time and where the change came from.
+
+![Fortuna's net-worth view with fictional demo data](docs/screenshots/net-worth.png)
+
+Income, spending by category and the forecast.
+
+![Fortuna's cashflow view with fictional demo data](docs/screenshots/cashflow.png)
+
+Fixed costs, detected from the bookings.
+
+![Fortuna's fixed-costs view with fictional demo data](docs/screenshots/fixed-costs.png)
+
+On a phone.
+
+<p>
+  <img src="docs/screenshots/phone-desk.png" width="300" alt="Fortuna's desk on a phone with fictional demo data">
+  <img src="docs/screenshots/phone-net-worth.png" width="300" alt="Fortuna's net-worth view on a phone with fictional demo data">
+</p>
 
 ## Stack
 
