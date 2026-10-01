@@ -12,10 +12,12 @@ import {
 } from "@/server/services/copilot";
 
 describe("Fortuna Copilot", () => {
-	it("acts as a strict Lower Franconian accountant who asks one question", () => {
+	it("acts as a factual accountant without dialect who asks one question", () => {
 		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain(
-			"unterfränkischer Buchhalter",
+			"Fortunas Buchhalter und privater Finanzcontroller",
 		);
+		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain("ohne Dialekt");
+		expect(COPILOT_DEVELOPER_INSTRUCTIONS).not.toMatch(/fränkisch/i);
 		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain(
 			"genau eine kurze Frage mit Referenz, Datum, Betrag und Originaltext",
 		);

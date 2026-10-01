@@ -3,6 +3,12 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.62.2 - 2026-10-01
+
+- Hr. Körner schreibt sachliches Hochdeutsch: ohne Dialekt, ohne regionale
+  Färbung und ohne Ironie. Das Gespräch beginnt dafür einmal neu; der
+  sichtbare Verlauf und das Gedächtnis bleiben erhalten.
+
 ## 0.62.1 - 2026-09-30
 
 - Öffentliche Quelltextansicht mit neuer, geprüfter Historie. Finanzdaten,

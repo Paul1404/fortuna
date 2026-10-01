@@ -1,6 +1,6 @@
 {
 	"name": "fortuna",
-	"version": "0.62.1",
+	"version": "0.62.2",
 	"private": true,
 	"license": "UNLICENSED",
 	"type": "module",
@@ -17,6 +17,7 @@
 		"test": "vitest run",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
 		"smoke": "bun scripts/smoke-routes.ts",
+		"screenshots": "bun scripts/capture-screenshots.ts",
 		"typecheck": "tsc --noEmit",
 		"format": "biome format --write",
 		"lint": "biome lint",

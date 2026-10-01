@@ -175,8 +175,8 @@ export function composeMonthlyRecap(input: RecapInput): MonthlyRecap {
 			enoughData: false,
 			sentences: [
 				`Für ${monthName} liegen zu wenige Buchungen vor.`,
-				"Aus dem bisschen eine Bilanz zu machen, wär geraten, und geraten wird hier nicht.",
-				"Nächsten Monat schau ich wieder drauf.",
+				"Eine Bilanz daraus wäre geraten, und geraten wird hier nicht.",
+				"Im nächsten Monat folgt der nächste Rückblick.",
 			],
 			numbers,
 		};
@@ -218,10 +218,10 @@ export function composeMonthlyRecap(input: RecapInput): MonthlyRecap {
 							: `sank um ${amount(netWorthChangeMinor, currency)}`
 				}`;
 	const noticed = notable
-		? `aufgefallen ist mir: ${notable}`
+		? `aufgefallen ist: ${notable}`
 		: current.netMinor >= 0
-			? "sonst ist mir nix aufgefallen, passt scho"
-			: "sonst ist mir nix aufgefallen";
+			? "sonst ist nichts aufgefallen, alles in Ordnung"
+			: "sonst ist nichts aufgefallen";
 	const third = worth
 		? `${worth}; ${noticed}.`
 		: `${noticed.charAt(0).toUpperCase()}${noticed.slice(1)}.`;
