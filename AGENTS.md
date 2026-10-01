@@ -807,6 +807,9 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   checks the ledger on resume, and refuses remote or production targets.
   Demo seeding is limited to local `fortuna_dev`, `fortuna_test`, and
   `fortuna_demo_*` names; never import owner data for public screenshots.
+  The README screenshots use `bun run db:seed:preview` in an empty local
+  `fortuna_demo_*` database and reconcile to EUR 65,000. Capture the real pages,
+  never edit displayed totals. Reproduction is in `docs/screenshot-preview.md`.
 - `bank_transaction_code.description` is sometimes prose and sometimes the bare
   ISO domain code: the Sparda answers "PMNT". Never show a four-capital code as
   a booking text — it makes the row unfilable by the owner and by Hr. Körner.

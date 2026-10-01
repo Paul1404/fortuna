@@ -1082,6 +1082,11 @@ d("financial flows against PostgreSQL", () => {
 
 	it("links internal transfers and excludes them from cashflow", async () => {
 		const date = addMonths(today, -2);
+		// This suite shares an owner across fixtures. Calendar months can contain
+		// earlier bookings; only the new transfer's effect must be zero.
+		const before = await cashflowReport(userId, { months: 6 });
+		const beforeMonth = before.months.find((m) => m.month === date.slice(0, 7));
+		expect(beforeMonth).toBeDefined();
 		await insertTransactions(
 			userId,
 			giroId,
@@ -1118,8 +1123,9 @@ d("financial flows against PostgreSQL", () => {
 		expect(out?.transferGroupId).toBe(inn?.transferGroupId);
 		const report = await cashflowReport(userId, { months: 6 });
 		const month = report.months.find((m) => m.month === date.slice(0, 7));
-		expect(month?.incomeMinor).toBe(0);
-		expect(month?.expenseMinor).toBe(0);
+		expect(month).toBeDefined();
+		expect(month?.incomeMinor).toBe(beforeMonth?.incomeMinor);
+		expect(month?.expenseMinor).toBe(beforeMonth?.expenseMinor);
 	});
 
 	it("manual categorisation survives rule re-application and can spawn a rule", async () => {
