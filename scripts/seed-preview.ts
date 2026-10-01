@@ -17,9 +17,54 @@ import { currentNetWorth } from "@/server/services/net-worth";
 import { ensureOwnerFromEnv } from "@/server/services/owner";
 import { runRecurringDetection } from "@/server/services/recurring";
 import {
+	detectAndLinkTransfers,
 	type IncomingTransaction,
 	insertTransactions,
 } from "@/server/services/transactions";
+
+/** Fixed seed: the same fictional year on every run. */
+function mulberry32(seed: number) {
+	let state = seed;
+	return () => {
+		state = (state + 0x6d2b79f5) | 0;
+		let t = Math.imul(state ^ (state >>> 15), 1 | state);
+		t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+		return ((t ^ (t >>> 14)) >>> 0) / 4_294_967_296;
+	};
+}
+
+/** Paid on the same day for the same amount every month. */
+// Never on the 1st: a booking on the opening date does not move the balance.
+const FIXED = [
+	["Hausverwaltung Lindenhof", "Miete", "rent-mortgage", 95_000, 2],
+	["Stadtwerke Musterstadt", "Strom Abschlag", "utilities", 7_800, 2],
+	["Netzwerk Nord", "Internetanschluss", "internet-phone", 3_999, 4],
+	["Mobilfunk Eins", "Mobilfunkvertrag", "internet-phone", 1_499, 9],
+	["Musterversicherung", "Haftpflicht und Hausrat", "insurance", 2_140, 1],
+	["Verkehrsverbund Musterstadt", "Monatskarte", "public-transport", 5_800, 1],
+	["Streamwelt", "Abo", "streaming", 1_399, 13],
+	["Tonstrom", "Abo", "streaming", 1_099, 17],
+	["Studio Aktiv", "Mitgliedsbeitrag", "fitness", 2_990, 2],
+] as const;
+
+/** Bought as needed: how often a month, and between which amounts. */
+const VARIABLE = [
+	["Frischemarkt", "groceries", 3, 4, 3_800, 9_400],
+	["Bio-Kontor", "groceries", 1, 2, 2_200, 5_600],
+	["Bäckerei Kornblume", "coffee-snacks", 2, 4, 350, 1_250],
+	["Trattoria Sole", "restaurants", 1, 2, 2_800, 6_400],
+	["Café Morgenrot", "restaurants", 1, 2, 900, 2_400],
+	["Tankstelle Süd", "fuel", 1, 2, 4_500, 7_600],
+	["Kino Lichtspiel", "leisure", 0, 2, 1_100, 2_800],
+	["Buchhandlung Seitenweise", "leisure", 0, 1, 1_400, 4_200],
+	["Kaufhaus Mitte", "clothing", 0, 1, 3_900, 14_900],
+] as const;
+
+/** Month-end depot values: a year that rises with two setbacks. */
+const DEPOT_PATH = [
+	2_465_000, 2_590_000, 2_640_000, 2_795_000, 2_730_000, 2_880_000, 3_045_000,
+	3_110_000, 3_060_000, 3_270_000, 3_420_000, 3_550_000,
+] as const;
 
 async function main() {
 	const target = process.env.DATABASE_URL ?? "";
@@ -45,12 +90,139 @@ async function main() {
 		(await findCategoryBySlug(userId, slug))?.id ?? null;
 	const transfer = await category("transfers");
 	const salary = await category("salary");
+	// The year is generated first, so the opening balance can be the one that
+	// lands the current account on EUR 4,200 whatever was spent on the way.
+	const random = mulberry32(65_000);
+	const between = (low: number, high: number) =>
+		low + Math.floor(random() * (high - low + 1));
+	const checkingMonths: IncomingTransaction[][] = [];
+	for (let i = 0; i < 12; i++) {
+		const month = addMonths(start, i);
+		const date = endOfMonth(month);
+		const rows: IncomingTransaction[] = [
+			{
+				bookingDate: addDays(month, 1),
+				// A raise in the second half of the year.
+				amountMinor: i < 7 ? 340_000 : 352_000,
+				currency: "EUR",
+				description: "Gehalt",
+				counterpartyName: "Musterbetrieb GmbH",
+				categoryId: salary,
+			},
+		];
+		for (const [name, description, slug, amountMinor, day] of FIXED)
+			rows.push({
+				bookingDate: addDays(month, day),
+				amountMinor: -amountMinor,
+				currency: "EUR",
+				description,
+				counterpartyName: name,
+				categoryId: await category(slug),
+			});
+		for (const [name, slug, least, most, low, high] of VARIABLE) {
+			const days = new Set<number>();
+			const visits = between(least, most);
+			while (days.size < visits) days.add(between(2, 26));
+			for (const day of days)
+				rows.push({
+					bookingDate: addDays(month, day),
+					amountMinor: -between(low, high),
+					currency: "EUR",
+					description: "Kartenzahlung",
+					counterpartyName: name,
+					categoryId: await category(slug),
+				});
+		}
+		// What happens once a year.
+		const calendarMonth = month.slice(5, 7);
+		if (calendarMonth === "01")
+			rows.push({
+				bookingDate: addDays(month, 6),
+				amountMinor: -48_600,
+				currency: "EUR",
+				description: "Kfz-Versicherung Jahresbeitrag",
+				counterpartyName: "Autoversicherung Direkt",
+				categoryId: await category("insurance"),
+			});
+		if (calendarMonth === "05")
+			rows.push({
+				bookingDate: addDays(month, 11),
+				amountMinor: 61_200,
+				currency: "EUR",
+				description: "Einkommensteuer Erstattung",
+				counterpartyName: "Finanzamt Musterstadt",
+				categoryId: await category("refunds"),
+			});
+		if (calendarMonth === "07")
+			rows.push({
+				bookingDate: addDays(month, 8),
+				amountMinor: -118_000,
+				currency: "EUR",
+				description: "Sommerurlaub",
+				counterpartyName: "Reisebüro Fernweh",
+				categoryId: await category("travel"),
+			});
+		if (calendarMonth === "12")
+			rows.push({
+				bookingDate: addDays(month, 14),
+				amountMinor: -24_000,
+				currency: "EUR",
+				description: "Geschenke",
+				counterpartyName: "Kaufhaus Mitte",
+				categoryId: await category("gifts-donations"),
+			});
+		// Left unfiled in the latest month, so the desk has something to show.
+		if (i === 11)
+			rows.push(
+				{
+					bookingDate: addDays(month, 27),
+					amountMinor: -3_490,
+					currency: "EUR",
+					description: "Kartenzahlung",
+					counterpartyName: "Eisenwaren Hoffmann",
+				},
+				{
+					bookingDate: addDays(month, 28),
+					amountMinor: -1_850,
+					currency: "EUR",
+					description: "Kartenzahlung",
+					counterpartyName: "Blumen am Markt",
+				},
+			);
+		// Both legs of a transfer stay unfiled: pairing files them, and it leaves
+		// alone anything that looks like the owner's own decision.
+		rows.push(
+			{
+				bookingDate: date,
+				amountMinor: -50_000,
+				currency: "EUR",
+				description: "Umbuchung Tagesgeld",
+			},
+			{
+				bookingDate: date,
+				amountMinor: -80_000,
+				currency: "EUR",
+				description: "Umbuchung Depot",
+			},
+			{
+				bookingDate: date,
+				amountMinor: -12_500,
+				currency: "EUR",
+				description: "Darlehen: Tilgung",
+				categoryId: transfer,
+			},
+		);
+		checkingMonths.push(rows);
+	}
+	const booked = checkingMonths
+		.flat()
+		.reduce((sum, row) => sum + row.amountMinor, 0);
 	const checking = await createAccount(userId, {
 		name: "Girokonto",
 		institution: "Musterbank",
 		type: "current",
 		currency: "EUR",
-		openingBalanceMinor: 498_000,
+		openingBalanceMinor: 420_000 - booked,
 		openingBalanceDate: start,
 	});
 	const savings = await createAccount(userId, {
@@ -114,62 +286,10 @@ async function main() {
 		interestRateBps: 0,
 		linkedAssetId: car.id,
 	});
-	const expenses = [
-		["Miete", "rent-mortgage", 95_000],
-		["Lebensmittel", "groceries", 46_000],
-		["Strom und Heizung", "utilities", 11_000],
-		["Versicherung", "insurance", 8_000],
-		["Internet und Telefon", "internet-phone", 4_000],
-		["Mobilität", "public-transport", 16_000],
-		["Essen gehen", "restaurants", 12_000],
-		["Abonnements", "subscriptions", 4_500],
-		["Freizeit", "leisure", 7_500],
-	] as const;
 	for (let i = 0; i < 12; i++) {
 		const month = addMonths(start, i);
 		const date = endOfMonth(month);
-		const checkingRows: IncomingTransaction[] = [
-			{
-				bookingDate: addDays(month, 1),
-				amountMinor: 340_000,
-				currency: "EUR",
-				description: "Gehalt Musterbetrieb",
-				counterpartyName: "Musterbetrieb",
-				categoryId: salary,
-			},
-		];
-		for (const [index, [description, slug, amountMinor]] of expenses.entries())
-			checkingRows.push({
-				bookingDate: addDays(month, index + 2),
-				amountMinor: -amountMinor,
-				currency: "EUR",
-				description,
-				counterpartyName: description,
-				categoryId: await category(slug),
-			});
-		checkingRows.push(
-			{
-				bookingDate: date,
-				amountMinor: -50_000,
-				currency: "EUR",
-				description: "Umbuchung Tagesgeld",
-				categoryId: transfer,
-			},
-			{
-				bookingDate: date,
-				amountMinor: -80_000,
-				currency: "EUR",
-				description: "Umbuchung Depot",
-				categoryId: transfer,
-			},
-			{
-				bookingDate: date,
-				amountMinor: -12_500,
-				currency: "EUR",
-				description: "Darlehen: Tilgung",
-				categoryId: transfer,
-			},
-		);
+		const checkingRows = checkingMonths[i] ?? [];
 		await insertTransactions(userId, checking.id, checkingRows, {
 			importSource: "preview",
 		});
@@ -182,7 +302,6 @@ async function main() {
 					amountMinor: 50_000,
 					currency: "EUR",
 					description: "Umbuchung Tagesgeld",
-					categoryId: transfer,
 				},
 			],
 			{ importSource: "preview" },
@@ -196,7 +315,6 @@ async function main() {
 					amountMinor: 80_000,
 					currency: "EUR",
 					description: "Umbuchung Depot",
-					categoryId: transfer,
 				},
 			],
 			{ importSource: "preview" },
@@ -204,7 +322,7 @@ async function main() {
 		await recordBalance(userId, {
 			accountId: investment.id,
 			date,
-			balanceMinor: 2_350_000 + (i + 1) * 100_000,
+			balanceMinor: DEPOT_PATH[i] ?? 3_550_000,
 			source: "manual",
 		});
 		await addValuation(userId, {
@@ -237,6 +355,7 @@ async function main() {
 		balanceMinor: -60_000,
 		source: "manual",
 	});
+	await detectAndLinkTransfers(userId);
 	await runRecurringDetection(userId);
 	const snapshot = await currentNetWorth(userId);
 	if (snapshot.netWorthMinor !== 6_500_000)

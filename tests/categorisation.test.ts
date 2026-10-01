@@ -292,7 +292,7 @@ describe("reading Hr. Körner's answer", () => {
 
 	it("carries questions with their quick answers", () => {
 		const answer =
-			'{"nachricht":"Bei einem bin i mir ned sicher.","zuordnungen":[],"rueckfragen":[{"haendler":"Manfred Deppert","frage":"Drei Zahlungen an Manfred Deppert — privat oder ein Handwerker?","antworten":["Privat","Handwerker","Miete"]}]}';
+			'{"nachricht":"Bei einem bin ich mir nicht sicher.","zuordnungen":[],"rueckfragen":[{"haendler":"Manfred Deppert","frage":"Drei Zahlungen an Manfred Deppert — privat oder ein Handwerker?","antworten":["Privat","Handwerker","Miete"]}]}';
 		const parsed = parseConsultation(answer, asked);
 		expect(parsed.questions).toEqual([
 			{
@@ -339,7 +339,9 @@ describe("reading Hr. Körner's answer", () => {
 	});
 
 	it("survives an answer that is not JSON at all", () => {
-		expect(parseConsultation("Des woaß i ned.", asked).assignments).toEqual([]);
+		expect(parseConsultation("Das weiß ich nicht.", asked).assignments).toEqual(
+			[],
+		);
 		expect(parseConsultation("{kaputt", asked).questions).toEqual([]);
 		expect(parseConsultation("", asked).message).toBe("");
 	});
@@ -363,7 +365,7 @@ describe("working through to the end", () => {
 		// Capping follow-ups at one question is why a list of 21 merchants
 		// stalled after the first exchange.
 		const answer = JSON.stringify({
-			nachricht: "Bei dreien bin i mir ned sicher.",
+			nachricht: "Bei dreien bin ich mir nicht sicher.",
 			zuordnungen: [],
 			rueckfragen: [
 				{ haendler: "eBay S.a.r.l.", frage: "Wofür?", antworten: ["Privat"] },

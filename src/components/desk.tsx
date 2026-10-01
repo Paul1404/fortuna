@@ -213,9 +213,7 @@ function TodayCard({
 			/>
 			{tasks.length === 0 ? (
 				<CardBody>
-					<p className="text-sm text-text-secondary">
-						Heut liegt nix auf dem Tisch. Passt scho.
-					</p>
+					<p className="text-sm text-text-secondary">Heute liegt nichts an.</p>
 				</CardBody>
 			) : (
 				<ul className="divide-y divide-border border-t border-border">

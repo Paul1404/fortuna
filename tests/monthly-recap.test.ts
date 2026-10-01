@@ -36,7 +36,7 @@ describe("month recap", () => {
 		expect(recap.sentences.map(plain)).toEqual([
 			"Im August kamen 4.210 € herein und 3.150 € gingen hinaus, übrig blieben 1.060 € – 25 % vom Einkommen.",
 			"Am meisten ging für Wohnen weg (1.200 €), insgesamt 230 € mehr als im Juli.",
-			"Das Vermögen wuchs um 1.500 €; sonst ist mir nix aufgefallen, passt scho.",
+			"Das Vermögen wuchs um 1.500 €; sonst ist nichts aufgefallen, alles in Ordnung.",
 		]);
 		expect(recap.numbers).toMatchObject({
 			incomeMinor: 421_000,
@@ -81,7 +81,7 @@ describe("month recap", () => {
 		expect(recap.sentences.map(plain)).toEqual([
 			"Im August gingen 3.900 € hinaus, herein kamen nur 3.500 €: 400 € mehr ausgegeben als eingenommen.",
 			"Am meisten ging für Wohnen weg (1.200 €), insgesamt ungefähr so viel wie im Juli.",
-			"Das Vermögen ohne Depot sank um 400 €; aufgefallen ist mir: Liquiditätsreserve unterschritten.",
+			"Das Vermögen ohne Depot sank um 400 €; aufgefallen ist: Liquiditätsreserve unterschritten.",
 		]);
 		expect(recap.numbers.savingsRateBps).toBe(-1_143);
 		expect(recap.numbers.observationCount).toBe(2);
@@ -97,7 +97,7 @@ describe("month recap", () => {
 		expect(recap.sentences.map(plain)).toEqual([
 			"Im August kamen 4.210 € herein und 3.150 € gingen hinaus, übrig blieben 1.060 € – 25 % vom Einkommen.",
 			"Der größte Posten ist noch nicht zugeordnet (800 €), einen Vergleich mit Juli gibt es noch nicht.",
-			"Sonst ist mir nix aufgefallen, passt scho.",
+			"Sonst ist nichts aufgefallen, alles in Ordnung.",
 		]);
 		expect(recap.numbers.expenseChangeMinor).toBeNull();
 		expect(recap.numbers.netWorthChangeMinor).toBeNull();

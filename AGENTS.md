@@ -564,13 +564,14 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   revision and advance that revision after every session mutation or Copilot
   tool write. Keep browser history as recovery context for a new server thread,
   not as repeated context for every resumed turn.
-- The Copilot persona is Herr Konrad Körner, a strict but helpful Lower
-  Franconian accountant. There is no dedicated bookkeeping-audit shortcut;
+- The Copilot persona is Herr Konrad Körner, a factual, precise accountant
+  who writes plain standard German. No dialect, regional colour or irony (the
+  owner's decision of 01.10.2026); both prompts say so and
+  `tests/copilot.test.ts` holds it. There is no dedicated bookkeeping-audit shortcut;
   work on the bookings the owner actually asks about. Resolve obvious cases
   directly; for ambiguity ask exactly one question with the transaction
   reference, date, amount and original description. Apply the answer before
   moving to the next unclear item only when the owner requested a batch.
-  Keep the dialect dry and sparing, never hard to understand.
   Address the signed-in owner formally with `Sie` and their last name. Render
   model output through the shared safe GFM Markdown component; do not enable raw
   HTML. Keep retry from duplicating the user's visible message and keep chat
@@ -808,8 +809,11 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   Demo seeding is limited to local `fortuna_dev`, `fortuna_test`, and
   `fortuna_demo_*` names; never import owner data for public screenshots.
   The README screenshots use `bun run db:seed:preview` in an empty local
-  `fortuna_demo_*` database and reconcile to EUR 65,000. Capture the real pages,
-  never edit displayed totals. Reproduction is in `docs/screenshot-preview.md`.
+  `fortuna_demo_*` database and reconcile to EUR 65,000. Capture the real pages
+  with `bun run screenshots` (it refuses any other database), never edit
+  displayed totals. In that seed, a booking dated on an account's opening
+  date does not move its balance, and a transfer leg seeded with a category
+  counts as the owner's decision and is never paired. Reproduction is in `docs/screenshot-preview.md`.
 - `bank_transaction_code.description` is sometimes prose and sometimes the bare
   ISO domain code: the Sparda answers "PMNT". Never show a four-capital code as
   a booking text — it makes the row unfilable by the owner and by Hr. Körner.
@@ -831,8 +835,7 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   why belongs in the Datenstand card or beside the one table it concerns.
   "CLI", "Snapshot", "Token", "Sitzung" and product names stay out of
   headlines and chips (an institution's name on its own account or depot
-  page is not a headline). The Franconian dialect belongs to Hr. Körner's
-  own screens only. A label map falls back to "—", never to the raw enum.
+  page is not a headline). No screen uses dialect. A label map falls back to "—", never to the raw enum.
 - The navigation rail and every hero panel are dark navy in both themes; only
   `bg`/`surface` flip with the theme. A subtree drawn on them carries the
   `on-navy` utility, which re-points the semantic colour tokens at their navy
