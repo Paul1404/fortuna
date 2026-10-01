@@ -33,10 +33,13 @@ boundary. Deletes, external side effects and bank payments are not exposed. Its 
 ## Current application screens
 
 These are real captures of Fortuna 0.62.1 from an isolated local database seeded
-with fictional financial data. They do not show the author's balances, accounts,
+with fictional financial data totalling EUR 65,000 in net worth. They do not show the author's balances, accounts,
 assets, transactions, or investment performance. No bank or broker was connected.
 The older images under `fortuna-brand/mockups` are design concepts, not these
 screens. See [the publication boundary](docs/publication.md).
+
+The screenshot scenario is reproducible with `bun run db:seed:preview` in a
+fresh local `fortuna_demo_*` database. See [the preview setup](docs/screenshot-preview.md).
 
 ![Fortuna's current financial desk with fictional demo data](docs/screenshots/desk.png)
 
