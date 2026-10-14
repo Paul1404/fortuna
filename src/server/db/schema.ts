@@ -13,6 +13,7 @@ import {
 	timestamp,
 	uniqueIndex,
 } from "drizzle-orm/pg-core";
+import type { BankTransactionDetails } from "@/domain/bank-transaction-details";
 import { user } from "./auth-schema";
 
 // Conventions
@@ -909,6 +910,7 @@ export const transactions = pgTable(
 		description: text("description").notNull(),
 		counterpartyName: text("counterparty_name"),
 		counterpartyIban: text("counterparty_iban"),
+		bankDetails: jsonb("bank_details").$type<BankTransactionDetails>(),
 		merchantId: text("merchant_id").references(() => merchants.id, {
 			onDelete: "set null",
 		}),
@@ -1091,6 +1093,10 @@ export const receivables = pgTable(
 			.references(() => user.id, { onDelete: "cascade" }),
 		name: text("name").notNull(),
 		debtorName: text("debtor_name").notNull(),
+		sourceTransactionId: text("source_transaction_id").references(
+			() => transactions.id,
+			{ onDelete: "set null" },
+		),
 		currency: text("currency").notNull(),
 		originalAmountMinor: money("original_amount_minor"),
 		currentBalanceMinor: money("current_balance_minor").default(0).notNull(),
@@ -1105,7 +1111,10 @@ export const receivables = pgTable(
 		settledAt: date("settled_at"),
 		...timestamps,
 	},
-	(t) => [index("receivables_user_idx").on(t.userId, t.isActive)],
+	(t) => [
+		index("receivables_user_idx").on(t.userId, t.isActive),
+		uniqueIndex("receivables_source_transaction_idx").on(t.sourceTransactionId),
+	],
 );
 
 export const receivableBalances = pgTable(

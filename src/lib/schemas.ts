@@ -469,6 +469,13 @@ export const ReceivableInput = v.object({
 	section: optionalText,
 	notes,
 });
+export const TransactionReceivableInput = v.object({
+	transactionId: id,
+	name: shortText,
+	debtorName: shortText,
+	amountMinor: v.pipe(nonNegativeMinor, v.minValue(1)),
+	dueDate: optionalIsoDate,
+});
 export const ReceivableUpdate = v.object({
 	id,
 	...v.partial(v.omit(ReceivableInput, ["currentBalanceMinor", "balanceDate"]))

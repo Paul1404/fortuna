@@ -404,3 +404,61 @@ export async function getEnableBankingTransactions(
 	}
 	return transactions;
 }
+
+/** Detail IDs are temporary lookup handles, not stable transaction identities. */
+export async function enrichEnableBankingTransactions(
+	credential: EnableBankingCredential,
+	accountId: string,
+	rows: Record<string, unknown>[],
+	needsDetails: (row: Record<string, unknown>) => boolean,
+	fetcher: typeof fetch = fetch,
+	psuHeaders: Record<string, string> | null = null,
+): Promise<Record<string, unknown>[]> {
+	const result = [...rows];
+	let reads = 0;
+	for (const [index, row] of rows.entries()) {
+		if (reads >= 10) break;
+		if (
+			typeof row.transaction_id !== "string" ||
+			!row.transaction_id ||
+			!needsDetails(row)
+		)
+			continue;
+		reads += 1;
+		try {
+			const detail = await requestJson(
+				`/accounts/${encodeURIComponent(accountId)}/transactions/${encodeURIComponent(row.transaction_id)}`,
+				createEnableBankingJwt(credential),
+				fetcher,
+				{},
+				psuHeaders,
+			);
+			// Enrich descriptive fields only. List amounts, status, dates and identity win.
+			const enriched = { ...row };
+			for (const key of [
+				"remittance_information",
+				"note",
+				"reference_number",
+				"bank_transaction_code",
+				"ultimate_creditor",
+				"ultimate_debtor",
+				"creditor",
+				"debtor",
+				"merchant_category_code",
+			])
+				if (detail[key] !== null && detail[key] !== undefined)
+					enriched[key] = detail[key];
+			result[index] = enriched;
+		} catch (error) {
+			// Preserve the sync's established auth and bank cooldown handling.
+			if (
+				error instanceof EnableBankingApiError &&
+				[401, 403, 429].includes(error.status)
+			)
+				throw error;
+			// Unsupported or temporarily unavailable: keep the list data and stop spending reads.
+			break;
+		}
+	}
+	return result;
+}

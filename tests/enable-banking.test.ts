@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+	mapTransactions,
 	TRANSACTION_READ_OVERLAP_DAYS,
 	transactionDescription,
 	transactionReadFrom,
@@ -75,4 +76,33 @@ describe("transaction read window", () => {
 		expect(transactionReadFrom("2026-09-20")).toBe("2026-09-13");
 		expect(transactionReadFrom("2026-03-03")).toBe("2026-02-24");
 	});
+});
+
+describe("additional bank fields", () => {
+	it("uses the ultimate recipient when a payment intermediary has no purpose", () => {
+		expect(
+			transactionDescription({
+				ultimate_creditor: { name: "Buchhandlung" },
+				creditor: { name: "Zahlungsdienst" },
+			}),
+		).toBe("Buchhandlung");
+	});
+});
+
+it("keeps the original identity when detail fields enrich a row without a reference", () => {
+	const original = {
+		transaction_amount: { amount: "10", currency: "EUR" },
+		booking_date: "2026-10-14",
+		credit_debit_indicator: "DBIT",
+		status: "BOOK",
+	};
+	const plain = mapTransactions([original], "account");
+	const enriched = mapTransactions(
+		[{ ...original, note: "Buchhandlung" }],
+		"account",
+		null,
+		[original],
+	);
+	expect(enriched[0].externalId).toBe(plain[0].externalId);
+	expect(enriched[0].bankDetails).toEqual({ note: "Buchhandlung" });
 });

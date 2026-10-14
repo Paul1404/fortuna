@@ -48,6 +48,7 @@ import {
 	SettingsUpdate,
 	TransactionFilter,
 	TransactionInput,
+	TransactionReceivableInput,
 	TransactionUpdate,
 	TransferLink,
 	ValuationInput,
@@ -672,6 +673,11 @@ export const router = {
 	},
 
 	receivables: {
+		fromTransaction: mutation
+			.input(TransactionReceivableInput)
+			.handler(({ context, input }) =>
+				receivablesSvc.createReceivableFromTransaction(context.user.id, input),
+			),
 		list: authed
 			.input(v.optional(v.object({ includeInactive: v.optional(v.boolean()) })))
 			.handler(({ context, input }) =>
