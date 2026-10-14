@@ -143,6 +143,10 @@ export async function recordReceivableBalance(
 	if (tx === db)
 		return db.transaction((t) => recordReceivableBalance(userId, input, t));
 	const receivable = await getReceivable(userId, input.receivableId, tx);
+	if (receivable.sourceStatus !== "confirmed")
+		throw new ORPCError("BAD_REQUEST", {
+			message: "Rückzahlungen können erst nach der Buchung erfasst werden.",
+		});
 	await tx
 		.insert(receivableBalances)
 		.values({
@@ -198,13 +202,9 @@ export async function createReceivableFromTransaction(
 			throw new ORPCError("NOT_FOUND", {
 				message: "Transaktion nicht gefunden",
 			});
-		if (
-			booking.status !== "booked" ||
-			booking.amountMinor >= 0 ||
-			booking.transferGroupId
-		)
+		if (booking.amountMinor >= 0 || booking.transferGroupId)
 			throw new ORPCError("BAD_REQUEST", {
-				message: "Nur eine gebuchte Ausgabe kann eine Forderung werden.",
+				message: "Nur eine Ausgabe kann eine Forderung werden.",
 			});
 		const existing = await tx.query.receivables.findFirst({
 			where: and(
@@ -227,21 +227,75 @@ export async function createReceivableFromTransaction(
 			.values({
 				userId,
 				sourceTransactionId: booking.id,
+				sourceStatus: booking.status === "pending" ? "pending" : "confirmed",
 				name: input.name,
 				debtorName: input.debtorName,
 				currency: booking.currency,
 				originalAmountMinor: input.amountMinor,
 				currentBalanceMinor: input.amountMinor,
-				balanceAsOf: booking.bookingDate,
-				startDate: booking.bookingDate,
+				balanceAsOf: booking.status === "pending" ? null : booking.bookingDate,
+				startDate: booking.status === "pending" ? null : booking.bookingDate,
 				dueDate: input.dueDate ?? null,
 			})
 			.returning();
-		await tx.insert(receivableBalances).values({
-			receivableId: row.id,
-			date: booking.bookingDate,
-			balanceMinor: input.amountMinor,
-		});
+		if (booking.status === "booked")
+			await tx.insert(receivableBalances).values({
+				receivableId: row.id,
+				date: booking.bookingDate,
+				balanceMinor: input.amountMinor,
+			});
 		return row;
+	});
+}
+
+/** Confirmation follows the real booked row, never the estimated hold date. */
+export async function confirmTransactionReceivable(
+	userId: string,
+	transactionId: string,
+	tx: DbOrTx,
+) {
+	const booking = await tx.query.transactions.findFirst({
+		where: and(
+			eq(transactions.id, transactionId),
+			eq(transactions.userId, userId),
+		),
+	});
+	if (
+		booking?.status !== "booked" ||
+		booking.amountMinor >= 0 ||
+		booking.transferGroupId
+	)
+		return;
+	const [claim] = await tx
+		.select()
+		.from(receivables)
+		.where(
+			and(
+				eq(receivables.userId, userId),
+				eq(receivables.sourceTransactionId, transactionId),
+				eq(receivables.sourceStatus, "pending"),
+			),
+		)
+		.for("update");
+	if (!claim) return;
+	const confirmedAmount = Math.min(
+		claim.currentBalanceMinor,
+		-booking.amountMinor,
+	);
+	await tx
+		.update(receivables)
+		.set({
+			sourceStatus: "confirmed",
+			currency: booking.currency,
+			balanceAsOf: booking.bookingDate,
+			startDate: booking.bookingDate,
+			currentBalanceMinor: confirmedAmount,
+			originalAmountMinor: confirmedAmount,
+		})
+		.where(eq(receivables.id, claim.id));
+	await tx.insert(receivableBalances).values({
+		receivableId: claim.id,
+		date: booking.bookingDate,
+		balanceMinor: confirmedAmount,
 	});
 }

@@ -1,0 +1,1 @@
+ALTER TABLE "receivables" ADD COLUMN "source_status" text DEFAULT 'confirmed' NOT NULL;

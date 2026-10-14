@@ -764,10 +764,16 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   detail reads retain list data; auth failures and 429 keep the sync's existing
   failure and cooldown handling. Duplicate imports merge metadata without
   changing owner notes or categories.
-- `receivables.fromTransaction` is session-only. It locks the user's booked
-  outflow and creates one linked receivable with a dated opening history row,
+- `receivables.fromTransaction` is session-only. It locks the user's
+  outflow and creates one linked receivable,
   in the booking's currency, for at most its magnitude. The bank booking stays
   intact; the unique source link makes concurrent submissions idempotent.
+  A pending outflow creates a `source_status = pending` claim without balance
+  history, outside net worth and confirmed sheet totals. Promotion through
+  import or a manual status change confirms it at the actual booked date,
+  capped at the final debit. Pending deletion marks its claim `cancelled`
+  before the FK clears the source; it stays visible outside net worth.
+  Repayment history may be written only for confirmed claims.
 - Enable Banking CNCL and RJCT transactions are dropped at mapping; only BOOK
   is booked. A provider pending row is deleted only under
   `unreportedPendingIds` (`src/domain/pending.ts`), and the read reaches back

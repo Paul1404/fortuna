@@ -48,12 +48,7 @@ export function TransactionReceivable({
 			</Link>
 		);
 	if (booking.amountMinor >= 0 || booking.transferGroupId) return null;
-	if (booking.status !== "booked")
-		return (
-			<p className="text-xs text-text-muted">
-				Eine Forderung können Sie anlegen, sobald die Ausgabe gebucht ist.
-			</p>
-		);
+
 	return (
 		<section className="space-y-3 border-t border-border pt-3">
 			{!open ? (
@@ -88,8 +83,9 @@ export function TransactionReceivable({
 				>
 					<h3 className="label-caps">Forderung aus dieser Ausgabe</h3>
 					<p className="text-xs text-text-secondary">
-						Die Ausgabe bleibt erhalten. Die Forderung zählt ab dem
-						Buchungsdatum als Vermögen, bis sie beglichen ist.
+						{booking.status === "pending"
+							? "Die Forderung bleibt vorgemerkt und zählt erst nach der Buchung zum Vermögen."
+							: "Die Ausgabe bleibt erhalten. Die Forderung zählt ab dem Buchungsdatum als Vermögen, bis sie beglichen ist."}
 					</p>
 					<Field label="Bezeichnung" htmlFor="receivable-name">
 						<Input

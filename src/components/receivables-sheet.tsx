@@ -78,7 +78,10 @@ export function ReceivablesPanel({ highlight }: { highlight?: string }) {
 			onError: reportError,
 		}),
 	);
-	const { open, settled } = splitSettled(rows);
+	const provisional = rows.filter((row) => row.sourceStatus !== "confirmed");
+	const { open, settled } = splitSettled(
+		rows.filter((row) => row.sourceStatus === "confirmed"),
+	);
 	const expectedMonthly = open
 		.filter((row) => row.currency === settings.baseCurrency)
 		.reduce((sum, row) => sum + (row.monthlyPaymentMinor ?? 0), 0);
@@ -97,6 +100,11 @@ export function ReceivablesPanel({ highlight }: { highlight?: string }) {
 			key={row.id}
 			title={row.debtorName}
 			meta={[
+				row.sourceStatus === "pending"
+					? "vorgemerkt"
+					: row.sourceStatus === "cancelled"
+						? "Zahlung weggefallen"
+						: null,
 				row.name !== DEFAULT_NAME ? row.name : null,
 				row.dueDate ? `fällig ${f.date(row.dueDate, "short")}` : null,
 				!row.isActive && row.settledAt
@@ -157,7 +165,19 @@ export function ReceivablesPanel({ highlight }: { highlight?: string }) {
 			/>
 			<div className="grid gap-5 xl:grid-cols-[minmax(0,3fr)_minmax(0,2fr)]">
 				<div className="space-y-4">
-					{open.length === 0 ? (
+					{provisional.length ? (
+						<Card>
+							<CardHeader title="Vorgemerkte Forderungen" />
+							<CardBody>
+								<p className="mb-3 text-xs text-text-muted">
+									Diese Beträge zählen erst nach der Buchung zum Vermögen.
+									Weggefallene Zahlungen bleiben zur Prüfung erhalten.
+								</p>
+								{provisional.map(renderRow)}
+							</CardBody>
+						</Card>
+					) : null}
+					{open.length === 0 && provisional.length === 0 ? (
 						<Card>
 							<EmptyState
 								title={
@@ -312,7 +332,15 @@ function ReceivableActions({
 	return (
 		<BalanceActionsDialog
 			title={row.debtorName}
-			subtitle={row.name !== DEFAULT_NAME ? row.name : undefined}
+			subtitle={
+				row.sourceStatus === "pending"
+					? "Vorgemerkt · noch nicht im Vermögen"
+					: row.sourceStatus === "cancelled"
+						? "Zahlung weggefallen · nicht im Vermögen"
+						: row.name !== DEFAULT_NAME
+							? row.name
+							: undefined
+			}
 			currency={row.currency}
 			balanceMinor={row.currentBalanceMinor}
 			balanceAsOf={row.balanceAsOf}
@@ -334,8 +362,8 @@ function ReceivableActions({
 					field: "Offener Betrag",
 				},
 			}}
-			canRecord
-			canSettle={row.isActive}
+			canRecord={row.sourceStatus === "confirmed"}
+			canSettle={row.isActive && row.sourceStatus === "confirmed"}
 			history={detail?.balances}
 			onRecord={({ date, balanceMinor, kind }) =>
 				write(

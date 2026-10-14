@@ -1093,6 +1093,10 @@ export const receivables = pgTable(
 			.references(() => user.id, { onDelete: "cascade" }),
 		name: text("name").notNull(),
 		debtorName: text("debtor_name").notNull(),
+		sourceStatus: text("source_status")
+			.$type<"pending" | "confirmed" | "cancelled">()
+			.default("confirmed")
+			.notNull(),
 		sourceTransactionId: text("source_transaction_id").references(
 			() => transactions.id,
 			{ onDelete: "set null" },

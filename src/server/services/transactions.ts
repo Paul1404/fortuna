@@ -34,6 +34,7 @@ import {
 } from "@/server/db/schema";
 import { getAccount, ownIbans, recomputeAccountBalance } from "./accounts";
 import { upsertMerchant } from "./merchants";
+import { confirmTransactionReceivable } from "./receivables";
 import { loadRules } from "./rules";
 
 export type TransactionRow = Transaction & {
@@ -466,6 +467,7 @@ export async function insertTransactions(
 									}),
 						})
 						.where(eq(transactions.id, held.id));
+					await confirmTransactionReceivable(userId, held.id, tx);
 					promoted += 1;
 				}
 			}
@@ -748,6 +750,8 @@ export async function updateTransaction(
 			.update(transactions)
 			.set(patch)
 			.where(eq(transactions.id, input.id));
+		if (input.status === "booked")
+			await confirmTransactionReceivable(userId, input.id, tx);
 		if (
 			input.amountMinor !== undefined ||
 			input.bookingDate !== undefined ||
@@ -840,6 +844,15 @@ export async function deleteTransaction(
 				})
 				.where(eq(transactions.transferGroupId, existing.transferGroupId));
 		}
+		await tx
+			.update(receivables)
+			.set({ sourceStatus: "cancelled" })
+			.where(
+				and(
+					eq(receivables.sourceTransactionId, id),
+					eq(receivables.sourceStatus, "pending"),
+				),
+			);
 		await tx.delete(transactions).where(eq(transactions.id, id));
 		await recomputeAccountBalance(userId, existing.accountId, tx);
 		await refreshRecurringOccurrences(userId, tx);
