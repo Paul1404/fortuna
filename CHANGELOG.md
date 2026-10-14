@@ -3,6 +3,13 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.63.1 - 2026-10-14
+
+- Forderungen können auch aus ausstehenden Ausgaben angelegt werden. Sie
+  bleiben vorgemerkt und zählen erst nach der Buchung zum Vermögen.
+- Beim Buchen wird die Forderung mit dem tatsächlichen Buchungsdatum bestätigt.
+  Fällt die Zahlung weg, bleibt sie zur Prüfung sichtbar, ohne das Vermögen zu erhöhen.
+
 ## 0.63.0 - 2026-10-14
 
 - Umsätze zeigen zusätzliche Bankhinweise, Referenzen und Zahlungsangaben.

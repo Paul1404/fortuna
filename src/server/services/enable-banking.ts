@@ -32,6 +32,7 @@ import {
 	bankConnections,
 	categories,
 	importJobs,
+	receivables,
 	transactions,
 } from "@/server/db/schema";
 import { logger } from "@/server/logger";
@@ -524,16 +525,34 @@ export async function expireUnreportedPending(
 		today,
 	);
 	if (!ids.length) return 0;
-	const removed = await db
-		.delete(transactions)
-		.where(
-			and(
-				eq(transactions.accountId, accountId),
-				eq(transactions.status, "pending"),
-				inArray(transactions.id, ids),
-			),
-		)
-		.returning({ id: transactions.id });
+	const removed = await db.transaction(async (tx) => {
+		const pending = await tx
+			.select({ id: transactions.id })
+			.from(transactions)
+			.where(
+				and(
+					eq(transactions.accountId, accountId),
+					eq(transactions.status, "pending"),
+					inArray(transactions.id, ids),
+				),
+			)
+			.for("update");
+		if (!pending.length) return [];
+		const pendingIds = pending.map((row) => row.id);
+		await tx
+			.update(receivables)
+			.set({ sourceStatus: "cancelled" })
+			.where(
+				and(
+					eq(receivables.sourceStatus, "pending"),
+					inArray(receivables.sourceTransactionId, pendingIds),
+				),
+			);
+		return tx
+			.delete(transactions)
+			.where(inArray(transactions.id, pendingIds))
+			.returning({ id: transactions.id });
+	});
 	return removed.length;
 }
 

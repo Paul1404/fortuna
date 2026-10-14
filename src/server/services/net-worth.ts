@@ -105,7 +105,15 @@ async function loadHistories(userId: string) {
 			.innerJoin(liabilities, eq(liabilities.id, liabilityBalances.liabilityId))
 			.where(eq(liabilities.userId, userId))
 			.orderBy(asc(liabilityBalances.date)),
-		db.select().from(receivables).where(eq(receivables.userId, userId)),
+		db
+			.select()
+			.from(receivables)
+			.where(
+				and(
+					eq(receivables.userId, userId),
+					eq(receivables.sourceStatus, "confirmed"),
+				),
+			),
 		db
 			.select({
 				receivableId: receivableBalances.receivableId,

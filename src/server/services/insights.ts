@@ -122,7 +122,9 @@ export async function dataQuality(userId: string) {
 			accountsSvc.listAccounts(userId),
 			assetsSvc.listAssets(userId),
 			liabilitiesSvc.listLiabilities(userId),
-			receivablesSvc.listReceivables(userId),
+			receivablesSvc
+				.listReceivables(userId)
+				.then((rows) => rows.filter((row) => row.sourceStatus === "confirmed")),
 			contractsSvc.listContracts(userId),
 		]);
 	const [settings, rates] = await Promise.all([

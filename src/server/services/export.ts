@@ -181,6 +181,7 @@ export async function exportReceivablesCsv(userId: string): Promise<string> {
 	return toCsv([
 		[
 			"forderung_id",
+			"buchungsstatus",
 			"bezeichnung",
 			"schuldner",
 			"waehrung",
@@ -200,6 +201,7 @@ export async function exportReceivablesCsv(userId: string): Promise<string> {
 		],
 		...rows.map(({ receivable, balance }) => [
 			receivable.id,
+			receivable.sourceStatus,
 			receivable.name,
 			receivable.debtorName,
 			receivable.currency,
