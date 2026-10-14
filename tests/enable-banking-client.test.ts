@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
 	createEnableBankingJwt,
 	EnableBankingApiError,
+	enrichEnableBankingTransactions,
 	getEnableBankingBalances,
 	getEnableBankingTransactions,
 	INSTITUTION_COUNTRIES,
@@ -17,6 +18,81 @@ describe("Enable Banking API client", () => {
 		.export({ format: "pem", type: "pkcs8" })
 		.toString();
 	const applicationId = "11111111-2222-4333-8444-555555555555";
+
+	it("fetches missing details with presence headers, preserving the list's financial facts", async () => {
+		const fetchMock = vi.fn(async () =>
+			Response.json({
+				note: "Kartenzahlung Buchhandlung",
+				transaction_amount: { amount: "999" },
+				status: "BOOK",
+				entry_reference: "changed",
+			}),
+		);
+		const rows = [
+			{
+				transaction_id: "temporary/id",
+				entry_reference: "stable",
+				status: "PDNG",
+				transaction_amount: { amount: "10" },
+			},
+			{ note: "Already known" },
+		];
+		const result = await enrichEnableBankingTransactions(
+			{ applicationId, privateKeyPem },
+			"account",
+			rows,
+			() => true,
+			fetchMock as unknown as typeof fetch,
+			{ "Psu-Ip-Address": "192.0.2.1" },
+		);
+		expect(result[0]).toEqual({
+			...rows[0],
+			note: "Kartenzahlung Buchhandlung",
+		});
+		expect(fetchMock).toHaveBeenCalledTimes(1);
+		const [url, init] = fetchMock.mock.calls[0] as unknown as [
+			string,
+			RequestInit,
+		];
+		expect(url).toContain("temporary%2Fid");
+		expect(new Headers(init.headers).get("Psu-Ip-Address")).toBe("192.0.2.1");
+	});
+	it("keeps list data on unsupported detail reads but propagates a bank cooldown", async () => {
+		const rows = [{ transaction_id: "id" }];
+		expect(
+			await enrichEnableBankingTransactions(
+				{ applicationId, privateKeyPem },
+				"account",
+				rows,
+				() => true,
+				vi.fn(async () =>
+					Response.json({}, { status: 404 }),
+				) as unknown as typeof fetch,
+			),
+		).toEqual(rows);
+		await expect(
+			enrichEnableBankingTransactions(
+				{ applicationId, privateKeyPem },
+				"account",
+				rows,
+				() => true,
+				vi.fn(async () =>
+					Response.json({}, { status: 429 }),
+				) as unknown as typeof fetch,
+			),
+		).rejects.toMatchObject({ status: 429 });
+	});
+	it("bounds extra reads to ten per account", async () => {
+		const fetchMock = vi.fn(async () => Response.json({ note: "Detail" }));
+		await enrichEnableBankingTransactions(
+			{ applicationId, privateKeyPem },
+			"account",
+			Array.from({ length: 20 }, (_, i) => ({ transaction_id: String(i) })),
+			() => true,
+			fetchMock as unknown as typeof fetch,
+		);
+		expect(fetchMock).toHaveBeenCalledTimes(10);
+	});
 
 	it("creates the documented short-lived RS256 JWT", () => {
 		const token = createEnableBankingJwt({

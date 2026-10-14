@@ -11,6 +11,7 @@ import {
 	or,
 	sql,
 } from "drizzle-orm";
+import { bankTransactionDetails } from "@/domain/bank-transaction-details";
 import { addDays, todayIso } from "@/domain/dates";
 import { transactionFingerprint } from "@/domain/fingerprint";
 import { parseDecimalToMinor } from "@/domain/money";
@@ -37,6 +38,7 @@ import { logger } from "@/server/logger";
 import {
 	authorizeEnableBankingSession,
 	EnableBankingApiError,
+	enrichEnableBankingTransactions,
 	getEnableBankingAccountDetails,
 	getEnableBankingBalances,
 	getEnableBankingSession,
@@ -373,8 +375,18 @@ export function transactionDescription(
 	const other = (value: string | null) =>
 		ownName && value?.trim().toLowerCase() === ownName ? null : value;
 	return (
-		usefulText(remittance.join(" · ")) ||
+		usefulText(remittance.join(" · ") || text(row.remittance_information)) ||
 		usefulText(text(row.note)) ||
+		usefulText(
+			other(
+				nestedText(
+					row.credit_debit_indicator === "CRDT"
+						? row.ultimate_debtor
+						: row.ultimate_creditor,
+					"name",
+				),
+			),
+		) ||
 		usefulText(other(nestedText(row.creditor, "name"))) ||
 		usefulText(other(nestedText(row.debtor, "name"))) ||
 		usefulText(nestedText(row.bank_transaction_code, "description")) ||
@@ -412,15 +424,16 @@ export function transactionStatus(value: unknown): "booked" | "pending" | null {
  * this owner's bookings into a merchant called "ALEX BEISPIEL" — grouping
  * unrelated transactions under a merchant that does not exist.
  */
-function mapTransactions(
+export function mapTransactions(
 	rows: ObjectValue[],
 	accountId: string,
 	holderName?: string | null,
+	identityRows = rows,
 ) {
 	const ownName = holderName?.trim().toLowerCase() || null;
 	const notTheOwner = (value: string | null) =>
 		value && value.trim().toLowerCase() !== ownName ? value : null;
-	return rows.flatMap((row) => {
+	return rows.flatMap((row, index) => {
 		const amount = object(row.transaction_amount);
 		const unsigned = parseDecimalToMinor(text(amount?.amount) ?? "");
 		const bookingDate =
@@ -430,14 +443,17 @@ function mapTransactions(
 		const status = transactionStatus(row.status);
 		if (unsigned === null || !bookingDate || !status) return [];
 		const debit = text(row.credit_debit_indicator) === "DBIT";
-		const counterparty = debit ? object(row.creditor) : object(row.debtor);
+		const counterparty = debit
+			? (object(row.ultimate_creditor) ?? object(row.creditor))
+			: (object(row.ultimate_debtor) ?? object(row.debtor));
 		const counterpartyAccount = debit
 			? object(row.creditor_account)
 			: object(row.debtor_account);
 		return [
 			{
+				bankDetails: bankTransactionDetails(row),
 				providerAccountId: accountId,
-				externalId: transactionExternalId(row, accountId),
+				externalId: transactionExternalId(identityRows[index], accountId),
 				bookingDate,
 				valueDate: text(row.value_date),
 				amountMinor: debit ? -Math.abs(unsigned) : Math.abs(unsigned),
@@ -941,7 +957,30 @@ export async function syncEnableBankingConnection(
 				fetch,
 				psuHeaders,
 			);
-			const mapped = mapTransactions(rawTransactions, uid, text(details.name));
+			const enriched = await enrichEnableBankingTransactions(
+				credential,
+				uid,
+				rawTransactions,
+				(row) => {
+					const purpose = transactionDescription(
+						row,
+						text(details.name)?.trim().toLowerCase(),
+					);
+					return (
+						purpose === NO_PURPOSE ||
+						/^ABRECHNUNG KARTE$/i.test(purpose) ||
+						(!bankTransactionDetails(row).purpose && !text(row.note))
+					);
+				},
+				fetch,
+				psuHeaders,
+			);
+			const mapped = mapTransactions(
+				enriched,
+				uid,
+				text(details.name),
+				rawTransactions,
+			);
 			stage = "import_job";
 			const [job] = await db
 				.insert(importJobs)

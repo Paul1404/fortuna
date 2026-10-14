@@ -15,6 +15,7 @@ import {
 	or,
 	sql,
 } from "drizzle-orm";
+import type { BankTransactionDetails } from "@/domain/bank-transaction-details";
 import { addDays } from "@/domain/dates";
 import { transactionFingerprint } from "@/domain/fingerprint";
 import { isEmptyBookingText, merchantKey, titleCase } from "@/domain/normalize";
@@ -26,6 +27,7 @@ import {
 	accounts,
 	categories,
 	categorizationRules,
+	receivables,
 	recurringPayments,
 	type Transaction,
 	transactions,
@@ -149,7 +151,7 @@ export async function listTransactions(
 export async function getTransaction(
 	userId: string,
 	id: string,
-): Promise<TransactionRow> {
+): Promise<TransactionRow & { receivableId: string | null }> {
 	const [row] = await db
 		.select(rowSelect)
 		.from(transactions)
@@ -162,10 +164,18 @@ export async function getTransaction(
 		.where(and(eq(transactions.id, id), eq(transactions.userId, userId)));
 	if (!row)
 		throw new ORPCError("NOT_FOUND", { message: "Transaktion nicht gefunden" });
-	return toRow(row);
+	const linked = await db.query.receivables.findFirst({
+		where: and(
+			eq(receivables.userId, userId),
+			eq(receivables.sourceTransactionId, id),
+		),
+		columns: { id: true },
+	});
+	return { ...toRow(row), receivableId: linked?.id ?? null };
 }
 
 export type IncomingTransaction = {
+	bankDetails?: BankTransactionDetails | null;
 	bookingDate: string;
 	valueDate?: string | null;
 	amountMinor: number;
@@ -360,6 +370,7 @@ export async function insertTransactions(
 				userId,
 				accountId,
 				bookingDate: incoming.bookingDate,
+				bankDetails: incoming.bankDetails ?? null,
 				valueDate: incoming.valueDate ?? null,
 				amountMinor: incoming.amountMinor,
 				currency,
@@ -384,6 +395,22 @@ export async function insertTransactions(
 			.returning({ id: transactions.id });
 		if (!row) {
 			duplicates += 1;
+			// Provider metadata is independent of the owner's category and notes.
+			if (incoming.bankDetails)
+				await tx
+					.update(transactions)
+					.set({
+						bankDetails: sql`coalesce(${transactions.bankDetails}, '{}'::jsonb) || ${JSON.stringify(incoming.bankDetails)}::jsonb`,
+					})
+					.where(
+						and(
+							eq(transactions.userId, userId),
+							eq(transactions.accountId, accountId),
+							incoming.externalId
+								? eq(transactions.externalId, incoming.externalId)
+								: eq(transactions.fingerprint, fingerprint),
+						),
+					);
 			// A bank reports a card payment as pending first and books it days
 			// later under the same reference or with the same content. Skipped as
 			// a duplicate, the booked version never landed: the row stayed pending
@@ -502,23 +529,46 @@ export async function insertTransactions(
 				incoming.externalId &&
 				!isEmptyBookingText(incoming.description) &&
 				merchantName
-			)
-				await tx
-					.update(transactions)
-					.set({
+			) {
+				const stored = await tx.query.transactions.findFirst({
+					where: and(
+						eq(transactions.userId, userId),
+						eq(transactions.accountId, accountId),
+						eq(transactions.externalId, incoming.externalId),
+						storedTextSaysNothing(),
+					),
+				});
+				if (stored) {
+					const next = transactionFingerprint({
+						bookingDate: stored.bookingDate,
+						amountMinor: stored.amountMinor,
+						currency: stored.currency,
 						description: incoming.description,
-						merchantName,
-						merchantId,
-						counterpartyName: incoming.counterpartyName ?? null,
-					})
-					.where(
-						and(
-							eq(transactions.userId, userId),
+						counterpartyIban: stored.counterpartyIban,
+					});
+					const taken = await tx.query.transactions.findFirst({
+						where: and(
 							eq(transactions.accountId, accountId),
-							eq(transactions.externalId, incoming.externalId),
-							storedTextSaysNothing(),
+							eq(transactions.fingerprint, next),
+							ne(transactions.id, stored.id),
 						),
-					);
+						columns: { id: true },
+					});
+					if (!taken)
+						await tx
+							.update(transactions)
+							.set({
+								description: incoming.description,
+								fingerprint: next,
+								merchantName,
+								merchantId,
+								counterpartyName: incoming.counterpartyName ?? null,
+							})
+							.where(
+								and(eq(transactions.id, stored.id), storedTextSaysNothing()),
+							);
+				}
+			}
 			continue;
 		}
 		inserted.push(row.id);

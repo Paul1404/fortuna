@@ -3,6 +3,14 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.63.0 - 2026-10-14
+
+- Umsätze zeigen zusätzliche Bankhinweise, Referenzen und Zahlungsangaben.
+  Unklare Buchungen werden beim Abgleich gezielt um verfügbare Bankdetails ergänzt.
+- Gebuchte Ausgaben lassen sich direkt als Forderung anlegen, auch für einen
+  Teilbetrag. Betrag, Währung und Buchungsdatum werden übernommen; die Forderung
+  bleibt mit der Ausgabe verknüpft.
+
 ## 0.62.2 - 2026-10-01
 
 - Hr. Körner schreibt sachliches Hochdeutsch: ohne Dialekt, ohne regionale

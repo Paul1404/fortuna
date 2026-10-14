@@ -14,6 +14,7 @@ import { toast } from "sonner";
 import { CategoryPicker } from "@/components/category-picker";
 import { CategoryReviewDialog } from "@/components/category-review";
 import { PageHeader } from "@/components/page-header";
+import { TransactionReceivable } from "@/components/transaction-receivable";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardHeader } from "@/components/ui/card";
@@ -29,6 +30,7 @@ import {
 	TableHeader,
 	TableRow,
 } from "@/components/ui/table";
+import { BANK_DETAIL_LABELS } from "@/domain/bank-transaction-details";
 import { todayIso } from "@/domain/dates";
 import { Money, useFormat } from "@/lib/format";
 import {
@@ -1111,6 +1113,12 @@ function TransactionEditor({
 				{t.description}
 			</p>
 
+			{t.bankDetails?.note && t.bankDetails.note !== t.description ? (
+				<p className="break-words text-sm text-text-secondary">
+					{t.bankDetails.note}
+				</p>
+			) : null}
+			<TransactionReceivable booking={t} onClose={onClose} />
 			<section className="space-y-2" aria-labelledby="d-cat-heading">
 				<div className="flex flex-wrap items-baseline justify-between gap-2">
 					<h3 id="d-cat-heading" className="label-caps">
@@ -1254,6 +1262,14 @@ function TransactionEditor({
 					Buchungsdetails und Umbuchung
 				</summary>
 				<dl className="mt-2 grid grid-cols-[110px_1fr] gap-x-3 gap-y-1">
+					{Object.entries(t.bankDetails ?? {}).map(([key, value]) => (
+						<div key={key} className="contents">
+							<dt className="text-text-muted">
+								{BANK_DETAIL_LABELS[key as keyof typeof BANK_DETAIL_LABELS]}
+							</dt>
+							<dd className="break-words">{value}</dd>
+						</div>
+					))}
 					<dt className="text-text-muted">Konto</dt>
 					<dd className="break-words">{t.accountName}</dd>
 					{t.counterpartyName ? (

@@ -7,6 +7,7 @@ import {
 	type ReceivableBalance,
 	receivableBalances,
 	receivables,
+	transactions,
 } from "@/server/db/schema";
 
 export type ReceivableRow = Receivable & { balanceCount: number };
@@ -168,4 +169,79 @@ export async function recordReceivableBalance(
 			})
 			.where(eq(receivables.id, receivable.id));
 	}
+}
+
+/** The debit remains the bank fact; the receivable records money owed back. */
+export async function createReceivableFromTransaction(
+	userId: string,
+	input: {
+		transactionId: string;
+		name: string;
+		debtorName: string;
+		amountMinor: number;
+		dueDate?: string | null;
+	},
+) {
+	return db.transaction(async (tx) => {
+		// Serialise two clicks so a booking cannot create two receivables.
+		const [booking] = await tx
+			.select()
+			.from(transactions)
+			.where(
+				and(
+					eq(transactions.userId, userId),
+					eq(transactions.id, input.transactionId),
+				),
+			)
+			.for("update");
+		if (!booking)
+			throw new ORPCError("NOT_FOUND", {
+				message: "Transaktion nicht gefunden",
+			});
+		if (
+			booking.status !== "booked" ||
+			booking.amountMinor >= 0 ||
+			booking.transferGroupId
+		)
+			throw new ORPCError("BAD_REQUEST", {
+				message: "Nur eine gebuchte Ausgabe kann eine Forderung werden.",
+			});
+		const existing = await tx.query.receivables.findFirst({
+			where: and(
+				eq(receivables.userId, userId),
+				eq(receivables.sourceTransactionId, booking.id),
+			),
+		});
+		if (existing) return existing;
+		if (
+			!Number.isSafeInteger(input.amountMinor) ||
+			input.amountMinor <= 0 ||
+			input.amountMinor > -booking.amountMinor
+		)
+			throw new ORPCError("BAD_REQUEST", {
+				message:
+					"Die Forderung muss zwischen einem Cent und dem Betrag der Ausgabe liegen.",
+			});
+		const [row] = await tx
+			.insert(receivables)
+			.values({
+				userId,
+				sourceTransactionId: booking.id,
+				name: input.name,
+				debtorName: input.debtorName,
+				currency: booking.currency,
+				originalAmountMinor: input.amountMinor,
+				currentBalanceMinor: input.amountMinor,
+				balanceAsOf: booking.bookingDate,
+				startDate: booking.bookingDate,
+				dueDate: input.dueDate ?? null,
+			})
+			.returning();
+		await tx.insert(receivableBalances).values({
+			receivableId: row.id,
+			date: booking.bookingDate,
+			balanceMinor: input.amountMinor,
+		});
+		return row;
+	});
 }

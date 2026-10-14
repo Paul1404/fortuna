@@ -757,6 +757,17 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   handed to the Copilot model, snapshot or tool result, goes through
   `withoutAccountIdentifiers`. `isolatedTurn` and `streamCopilot` claim the
   owner in `activeTurns` before their first await.
+- Bank transaction details are selected fields in `transactions.bank_details`,
+  never raw provider responses. Sync enriches unclear rows through the official
+  detail endpoint, at most ten reads per account, forwarding the existing PSU
+  headers and preserving the list's financial facts and identity. Unsupported
+  detail reads retain list data; auth failures and 429 keep the sync's existing
+  failure and cooldown handling. Duplicate imports merge metadata without
+  changing owner notes or categories.
+- `receivables.fromTransaction` is session-only. It locks the user's booked
+  outflow and creates one linked receivable with a dated opening history row,
+  in the booking's currency, for at most its magnitude. The bank booking stays
+  intact; the unique source link makes concurrent submissions idempotent.
 - Enable Banking CNCL and RJCT transactions are dropped at mapping; only BOOK
   is booked. A provider pending row is deleted only under
   `unreportedPendingIds` (`src/domain/pending.ts`), and the read reaches back
