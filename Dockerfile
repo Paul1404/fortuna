@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # 1. builder: install all deps and build the Nitro server output (.output/)
-FROM oven/bun:1.4.2-alpine AS builder
+FROM oven/bun:1.4.3-alpine AS builder
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile
@@ -9,13 +9,13 @@ COPY . .
 RUN bun run build
 
 # 2. prod-deps: production-only node_modules for the migrator and runtime.
-FROM oven/bun:1.4.2-debian AS prod-deps
+FROM oven/bun:1.4.3-debian AS prod-deps
 WORKDIR /app
 COPY package.json bun.lock ./
 RUN bun install --frozen-lockfile --production
 
 # 3. runner: glibc is required by Scalable's signed official Linux CLI.
-FROM oven/bun:1.4.2-debian AS runner
+FROM oven/bun:1.4.3-debian AS runner
 WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends \
 	poppler-utils ca-certificates curl minisign && rm -rf /var/lib/apt/lists/*
