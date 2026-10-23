@@ -95,9 +95,6 @@ function DepotDetail() {
 			moves.filter((move) => move.isin === isin),
 			pulseMatches,
 		);
-	const stale =
-		!account.valuationAt ||
-		Date.now() - new Date(account.valuationAt).getTime() > 30 * 86400_000;
 	const holdingsValue = positions.reduce(
 		(sum, position) => sum + (position.valueMinor ?? 0),
 		0,
@@ -133,7 +130,6 @@ function DepotDetail() {
 						>
 							{account.status === "active" ? "Aktiv" : "Letzter Bestand"}
 						</Badge>
-						{stale ? <Badge variant="warning">Bewertung veraltet</Badge> : null}
 					</span>
 				}
 				actions={
@@ -321,11 +317,11 @@ function DepotDetail() {
 												readingKey={pulse?.checkedAt}
 											/>
 											<TableCell>
-												<Badge variant={positionStale ? "warning" : "default"}>
+												<Badge>
 													{position.valueMinor === null
 														? "ohne Wert"
 														: positionStale
-															? "veraltet"
+															? "Letzter Stand"
 															: position.verification === "provider_reported"
 																? "Anbieterwert"
 																: "geschätzt"}

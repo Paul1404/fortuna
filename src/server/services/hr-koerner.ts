@@ -1,5 +1,15 @@
 import { ORPCError } from "@orpc/server";
-import { and, desc, eq, gte, inArray, isNotNull, lte, min } from "drizzle-orm";
+import {
+	and,
+	desc,
+	eq,
+	gte,
+	inArray,
+	isNotNull,
+	isNull,
+	lte,
+	min,
+} from "drizzle-orm";
 import { splitTotal, type TargetSplit } from "@/domain/capital-advice";
 import {
 	addDays,
@@ -17,6 +27,7 @@ import {
 	estimateGoalDelayDays,
 	type FixedCostTrendMonth,
 } from "@/domain/hr-koerner";
+import { observationEnabled } from "@/domain/hr-koerner-notifications";
 import { normaliseInvestmentRules } from "@/domain/investment-rules";
 import {
 	monthlyExpenseBasis,
@@ -33,7 +44,6 @@ import {
 	transactions,
 } from "@/server/db/schema";
 import { cashflowReport } from "./cashflow";
-import { dataQuality } from "./insights";
 import { currentNetWorth, netWorthAt, providerHistoryGap } from "./net-worth";
 import { listRecurring } from "./recurring";
 import { getSettings } from "./settings";
@@ -348,12 +358,38 @@ export async function fixedCostTrend(
 }
 
 export async function listObservations(userId: string) {
-	return db
-		.select()
-		.from(financialObservations)
-		.where(eq(financialObservations.userId, userId))
-		.orderBy(desc(financialObservations.lastDetectedAt))
-		.limit(200);
+	const [rows, profile] = await Promise.all([
+		db
+			.select()
+			.from(financialObservations)
+			.where(eq(financialObservations.userId, userId))
+			.orderBy(desc(financialObservations.lastDetectedAt))
+			.limit(200),
+		getFinancialProfile(userId),
+	]);
+	return rows.filter(
+		(row) =>
+			(row.status !== "open" && row.status !== "snoozed") ||
+			observationEnabled(row, profile.alertSensitivity),
+	);
+}
+
+/** Reading acknowledges only the rows actually shown, without resolving them. */
+export async function markObservationsRead(userId: string, ids: string[]) {
+	if (!ids.length) return { read: 0 };
+	const rows = await db
+		.update(financialObservations)
+		.set({ readAt: new Date() })
+		.where(
+			and(
+				eq(financialObservations.userId, userId),
+				eq(financialObservations.status, "open"),
+				isNull(financialObservations.readAt),
+				inArray(financialObservations.id, ids),
+			),
+		)
+		.returning({ id: financialObservations.id });
+	return { read: rows.length };
 }
 
 export async function updateObservation(
@@ -431,35 +467,33 @@ async function performReview(userId: string, force: boolean) {
 		});
 	try {
 		const today = todayIso(now);
-		const [profile, settings, worth, recurring, quality, txRows] =
-			await Promise.all([
-				getFinancialProfile(userId),
-				getSettings(userId),
-				currentNetWorth(userId),
-				listRecurring(userId),
-				dataQuality(userId),
-				db
-					.select({
-						id: transactions.id,
-						bookingDate: transactions.bookingDate,
-						amountMinor: transactions.amountMinor,
-						currency: transactions.currency,
-						merchantName: transactions.merchantName,
-						categoryId: transactions.categoryId,
-						transferGroupId: transactions.transferGroupId,
-						status: transactions.status,
-					})
-					.from(transactions)
-					.where(
-						and(
-							eq(transactions.userId, userId),
-							gte(transactions.bookingDate, addDays(today, -90)),
-							lte(transactions.bookingDate, today),
-						),
-					)
-					.orderBy(desc(transactions.bookingDate))
-					.limit(2000),
-			]);
+		const [profile, settings, worth, recurring, txRows] = await Promise.all([
+			getFinancialProfile(userId),
+			getSettings(userId),
+			currentNetWorth(userId),
+			listRecurring(userId),
+			db
+				.select({
+					id: transactions.id,
+					bookingDate: transactions.bookingDate,
+					amountMinor: transactions.amountMinor,
+					currency: transactions.currency,
+					merchantName: transactions.merchantName,
+					categoryId: transactions.categoryId,
+					transferGroupId: transactions.transferGroupId,
+					status: transactions.status,
+				})
+				.from(transactions)
+				.where(
+					and(
+						eq(transactions.userId, userId),
+						gte(transactions.bookingDate, addDays(today, -90)),
+						lte(transactions.bookingDate, today),
+					),
+				)
+				.orderBy(desc(transactions.bookingDate))
+				.limit(2000),
+		]);
 		const [reserve, trend] = await Promise.all([
 			reserveFor(userId, {
 				profile,
@@ -480,19 +514,7 @@ async function performReview(userId: string, force: boolean) {
 				(row) => !trend.payrollPaymentIds.has(row.id),
 			),
 			fixedCostTrend: trend.months,
-			staleValuations: quality.entries.filter(
-				(entry) =>
-					entry.kind === "asset" &&
-					(entry.ageDays === null ||
-						entry.ageDays >
-							(profile.alertSensitivity === "detailed" ? 14 : 30)),
-			),
-		}).filter(
-			(item) =>
-				profile.alertSensitivity !== "quiet" ||
-				item.severity === "urgent" ||
-				item.severity === "review",
-		);
+		});
 		const existing = await db
 			.select()
 			.from(financialObservations)
@@ -523,6 +545,8 @@ async function performReview(userId: string, force: boolean) {
 				.set({
 					...item,
 					status: "open",
+					// A resolved problem returning is new; repeated reviews are not.
+					...(previous.status === "resolved" ? { readAt: null } : {}),
 					lastDetectedAt: now,
 					resolvedAt: null,
 					snoozedUntil: null,
@@ -537,7 +561,11 @@ async function performReview(userId: string, force: boolean) {
 		}
 		const activeKeys = candidates.map((item) => item.key);
 		const missing = existing
-			.filter((row) => row.status === "open" && !activeKeys.includes(row.key))
+			.filter(
+				(row) =>
+					(row.status === "open" || row.status === "snoozed") &&
+					!activeKeys.includes(row.key),
+			)
 			.map((row) => row.id);
 		if (missing.length)
 			await db

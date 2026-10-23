@@ -19,7 +19,7 @@ import { currentNetWorth, netWorthAt, providerHistoryGap } from "./net-worth";
 /**
  * The recap stands on the desk on the first days of a month only: after
  * that it is old news, and the desk is for today. Past recaps stay
- * reachable from "Erledigt und entschieden".
+ * reachable from "Hinweise und Entscheidungen".
  */
 export const RECAP_VISIBLE_DAYS = 10;
 

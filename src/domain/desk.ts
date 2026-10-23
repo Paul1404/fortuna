@@ -6,6 +6,7 @@ import type {
 	LiquidityStructure,
 	LiquidityTier,
 } from "./desk-contract";
+import { isActionableProblem } from "./hr-koerner-notifications";
 import { formatMoney } from "./money";
 import { computeNetWorth, type NetWorthInput } from "./net-worth";
 
@@ -14,8 +15,7 @@ import { computeNetWorth, type NetWorthInput } from "./net-worth";
  * step, and how quickly the owner's wealth becomes spendable money.
  *
  * Everything here is pure. The service gathers the inputs from the existing
- * engines (categorisation, observations, the "Anlegen" plan, data quality,
- * net worth) and this module only decides what to put on the
+ * engines (categorisation, observations, data quality, net worth) and this module only decides what to put on the
  * desk, in which order, and in which words. Money is always a proposal the
  * owner acts on; Fortuna never moves it.
  */
@@ -269,10 +269,9 @@ export function transferSource(
 // Tasks
 // ---------------------------------------------------------------------------
 
-/** How many stale values reach the desk; the rest wait on the Datenstand card. */
-export const MAX_VALUE_TASKS = 5;
-
 export type DeskObservation = {
+	type: string;
+	actionable: boolean;
 	id: string;
 	key: string;
 	severity: "info" | "notable" | "review" | "urgent";
@@ -282,7 +281,7 @@ export type DeskObservation = {
 	currency: string | null;
 };
 
-export type DeskOutdatedEntry = {
+export type DeskQualityEntry = {
 	id: string;
 	kind: "account" | "asset" | "liability" | "receivable" | "fxRate";
 	name: string;
@@ -303,13 +302,8 @@ export type DeskInputs = {
 	};
 	/** Hr. Körner's open observations. */
 	observations: readonly DeskObservation[];
-	/**
-	 * Money the "Anlegen" plan (`planInvestment`) finds free: bank cash above
-	 * what stays liquid, and broker cash. Null without a depot.
-	 */
-	freeMoney: { bankMinor: number; brokerMinor: number } | null;
-	/** Data-quality entries; only the outdated ones become tasks. */
-	quality: readonly DeskOutdatedEntry[];
+	/** Only a missing exchange rate has a concrete effect on totals. */
+	quality: readonly DeskQualityEntry[];
 };
 
 const SEVERITY_RANK: Record<DeskTask["severity"], number> = {
@@ -320,8 +314,7 @@ const SEVERITY_RANK: Record<DeskTask["severity"], number> = {
 
 /**
  * Urgent before review before info, then the larger sum. Ties keep the order
- * they were composed in (the sort is stable), so the oldest stale value stays
- * ahead of a newer one.
+ * they were composed in (the sort is stable), so equally important tasks keep their order.
  */
 export function orderTasks(tasks: readonly DeskTask[]): DeskTask[] {
 	return [...tasks].sort(
@@ -331,30 +324,19 @@ export function orderTasks(tasks: readonly DeskTask[]): DeskTask[] {
 	);
 }
 
-/** The same rule as the dashboard's `outdatedEntries`: no date, or older than 30 days. */
-export function isOutdated(entry: { state: string }): boolean {
-	return entry.state === "stale" || entry.state === "missing";
-}
-
-/**
- * Where a stale value is updated: straight into the asset's value update,
- * and to the receivable or liability row, which opens its action sheet.
- */
-const QUALITY_HREFS: Record<DeskOutdatedEntry["kind"], (id: string) => string> =
-	{
-		account: (id) => `/accounts/${id}`,
-		asset: (id) => `/assets/${id}?update=1`,
-		liability: (id) => `/debts?tab=liabilities&highlight=${id}`,
-		receivable: (id) => `/debts?highlight=${id}`,
-		fxRate: () => "/settings",
+/** An investment opportunity stays outside the task list. */
+export function investmentOpportunity(
+	free: { bankMinor: number; brokerMinor: number } | null,
+): { bankMinor: number; brokerMinor: number } | null {
+	if (
+		!free ||
+		(free.bankMinor < MIN_TRANSFER_MINOR && free.brokerMinor < MIN_ORDER_MINOR)
+	)
+		return null;
+	return {
+		bankMinor: free.bankMinor >= MIN_TRANSFER_MINOR ? free.bankMinor : 0,
+		brokerMinor: free.brokerMinor,
 	};
-
-/** The update link for a `stale_valuation:<kind>:<id>` observation key. */
-function staleValuationHref(key: string): string | undefined {
-	const [prefix, kind, id] = key.split(":");
-	if (prefix !== "stale_valuation" || !id || !(kind in QUALITY_HREFS))
-		return undefined;
-	return QUALITY_HREFS[kind as DeskOutdatedEntry["kind"]](id);
 }
 
 function plural(count: number, one: string, many: string): string {
@@ -391,9 +373,8 @@ export function composeDeskTasks(input: DeskInputs): DeskTask[] {
 		});
 	}
 
-	// An observation already says what it says; nothing below repeats it.
-	const observationKeys = new Set(input.observations.map((row) => row.key));
-	for (const observation of input.observations)
+	// Trends, estimates and optional analysis are observations, never chores.
+	for (const observation of input.observations.filter(isActionableProblem))
 		tasks.push({
 			key: `observation:${observation.key}`,
 			severity: observationSeverity(observation.severity),
@@ -407,67 +388,19 @@ export function composeDeskTasks(input: DeskInputs): DeskTask[] {
 			action: {
 				kind: "observation",
 				observationId: observation.id,
-				href: staleValuationHref(observation.key),
 			},
 		});
 
-	// One task for one question: is there money that should be working?
-	// Its one action opens "Anlegen", which carries both the transfer and the
-	// buys. Below the thresholds it is not worth an afternoon.
-	const free = input.freeMoney;
-	if (
-		free &&
-		(free.bankMinor >= MIN_TRANSFER_MINOR ||
-			free.brokerMinor >= MIN_ORDER_MINOR)
-	) {
-		const bank = free.bankMinor >= MIN_TRANSFER_MINOR ? free.bankMinor : 0;
+	for (const entry of input.quality.filter(
+		(entry) => entry.kind === "fxRate" && entry.state === "missing",
+	))
 		tasks.push({
-			key: "invest_money",
+			key: `missing_rate:${entry.id}`,
 			severity: "review",
-			title: "Freies Geld",
-			detail: `${[
-				bank > 0 ? `${money(bank)} auf dem Konto` : null,
-				free.brokerMinor > 0 ? `${money(free.brokerMinor)} im Depot` : null,
-			]
-				.filter(Boolean)
-				.join(", ")}.`,
-			amountMinor: bank + free.brokerMinor,
-			action: {
-				kind: "invest_money",
-				bankMinor: bank,
-				brokerMinor: free.brokerMinor,
-			},
-		});
-	}
-
-	const outdated = input.quality
-		.filter(isOutdated)
-		.filter(
-			(entry) =>
-				!observationKeys.has(`stale_valuation:${entry.kind}:${entry.id}`),
-		)
-		// A missing date first, then the oldest.
-		.sort(
-			(left, right) =>
-				(right.ageDays ?? Number.MAX_SAFE_INTEGER) -
-					(left.ageDays ?? Number.MAX_SAFE_INTEGER) ||
-				left.id.localeCompare(right.id),
-		)
-		.slice(0, MAX_VALUE_TASKS);
-	for (const entry of outdated)
-		tasks.push({
-			key: `update_value:${entry.kind}:${entry.id}`,
-			severity: "info",
-			title: `${entry.name} aktualisieren`,
-			detail:
-				entry.ageDays === null
-					? "Kein Datum hinterlegt."
-					: `Letzter Stand vor ${entry.ageDays} Tagen.`,
+			title: `${entry.name} fehlt`,
+			detail: "Beträge in dieser Währung fehlen in den Summen.",
 			amountMinor: null,
-			action: {
-				kind: "update_value",
-				href: QUALITY_HREFS[entry.kind](entry.id),
-			},
+			action: { kind: "open", href: "/settings" },
 		});
 
 	return orderTasks(tasks);

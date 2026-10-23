@@ -1,4 +1,5 @@
 import { addDays, addMonths, daysBetween } from "./dates";
+import { observationEnabled } from "./hr-koerner-notifications";
 import { formatMoney } from "./money";
 
 // Recurring amounts are stored signed: an outflow is negative. Every threshold
@@ -6,7 +7,9 @@ import { formatMoney } from "./money";
 /** A payment big enough to be worth warning about before it lands. */
 const DEFAULT_LARGE_PAYMENT_MINOR = 50_000;
 /** A single purchase worth comparing against its own baseline. */
-const DEFAULT_NOTABLE_SPEND_MINOR = 5_000;
+const DEFAULT_NOTABLE_SPEND_MINOR = 25_000;
+/** A handful of purchases is not a reliable shopping baseline. */
+const MIN_MERCHANT_HISTORY = 6;
 /** Per-month cost below which a subscription counts as a small leak. */
 const SMALL_SUBSCRIPTION_MINOR = 1_500;
 
@@ -64,12 +67,6 @@ export type ReviewInput = {
 		/** What it cost before, when detection saw the amount move and stay. */
 		previousAmountMinor?: number | null;
 		priceChangedAt?: string | null;
-	}[];
-	staleValuations: {
-		id: string;
-		name: string;
-		kind: string;
-		ageDays: number | null;
 	}[];
 	/**
 	 * Fixed costs and income per full calendar month, oldest first, in base
@@ -259,7 +256,7 @@ export function detectFinancialObservations(
 		findings.push({
 			key: "liquidity:reserve",
 			type: "liquidity_below_floor",
-			severity: "urgent",
+			severity: input.cashMinor < 0 ? "urgent" : "review",
 			title: "Liquiditätsreserve unterschritten",
 			explanation:
 				"Der aktuelle liquide Bestand liegt unter der Reserve aus Ihren Zielen (Monatsausgaben oder Mindestreserve, der größere Betrag).",
@@ -340,7 +337,7 @@ export function detectFinancialObservations(
 			(a, b) =>
 				a.bookingDate.localeCompare(b.bookingDate) || a.id.localeCompare(b.id),
 		);
-		for (let index = 3; index < ordered.length; index++) {
+		for (let index = MIN_MERCHANT_HISTORY; index < ordered.length; index++) {
 			const current = ordered[index];
 			if (daysBetween(current.bookingDate, input.today) > 14) continue;
 			const prior = ordered.slice(0, index);
@@ -355,8 +352,8 @@ export function detectFinancialObservations(
 			findings.push({
 				key: `unusual_spend:${current.id}`,
 				type: "unusual_spend",
-				severity: "notable",
-				title: `Ungewöhnliche Ausgabe bei ${current.merchantName}`,
+				severity: "info",
+				title: `Größere Ausgabe bei ${current.merchantName}`,
 				explanation:
 					"Diese Buchung liegt deutlich über Ihrem bisherigen Median bei diesem Händler. Das ist auffällig, nicht automatisch falsch.",
 				evidence: {
@@ -372,7 +369,7 @@ export function detectFinancialObservations(
 				confidence: "medium",
 				periodStart: since,
 				periodEnd: input.today,
-				actionable: true,
+				actionable: false,
 			});
 		}
 	}
@@ -402,7 +399,7 @@ export function detectFinancialObservations(
 			// one is never reported twice.
 			key: `price_increase:${row.id}:${row.priceChangedAt}`,
 			type: "recurring_price_increase",
-			severity: annualDifference >= 5_000 ? "review" : "notable",
+			severity: "notable",
 			title: `${row.name} ist teurer geworden`,
 			explanation: `Seit ${row.priceChangedAt} werden ${(to / 100).toFixed(2).replace(".", ",")} ${symbol} statt ${(from / 100).toFixed(2).replace(".", ",")} ${symbol} abgebucht.`,
 			evidence: {
@@ -440,10 +437,10 @@ export function detectFinancialObservations(
 				.sort()
 				.join(":")}`,
 			type: "repeated_small_leak",
-			severity: "review",
-			title: "Kleine Abos, relevante Jahressumme",
+			severity: "info",
+			title: "Abos im Überblick",
 			explanation:
-				"Mehrere kleine Abos summieren sich. Ob Sie sie nutzen, ist aus Zahlungen allein nicht erkennbar.",
+				"Die laufenden Abos im Überblick, mit Monats- und Jahressumme.",
 			evidence: {
 				count: smallSubscriptions.length,
 				monthlyMinor: monthly,
@@ -455,7 +452,7 @@ export function detectFinancialObservations(
 			confidence: "high",
 			periodStart: null,
 			periodEnd: input.today,
-			actionable: true,
+			actionable: false,
 		});
 	}
 
@@ -467,30 +464,7 @@ export function detectFinancialObservations(
 		if (creep) findings.push(creep);
 	}
 
-	for (const row of input.staleValuations) {
-		if (
-			row.ageDays !== null &&
-			row.ageDays <= (input.profile.alertSensitivity === "detailed" ? 14 : 30)
-		)
-			continue;
-		findings.push({
-			key: `stale_valuation:${row.kind}:${row.id}`,
-			type: "stale_asset_valuation",
-			severity: "notable",
-			title: `Wert prüfen: ${row.name}`,
-			explanation:
-				row.ageDays === null
-					? "Für diesen Vermögenswert fehlt ein Bewertungsdatum."
-					: `Die letzte Bewertung ist ${row.ageDays} Tage alt. Der ausgewiesene Wert kann überholt sein.`,
-			evidence: { kind: row.kind, ageDays: row.ageDays },
-			sourceEntities: [row.id],
-			currency: null,
-			impactMinor: null,
-			confidence: "high",
-			periodStart: null,
-			periodEnd: input.today,
-			actionable: true,
-		});
-	}
-	return findings;
+	return findings.filter((item) =>
+		observationEnabled(item, input.profile.alertSensitivity),
+	);
 }

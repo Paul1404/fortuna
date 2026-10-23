@@ -4,12 +4,14 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addDays, todayIso } from "@/domain/dates";
 import { db, pool } from "@/server/db";
 import { user } from "@/server/db/auth-schema";
+import { financialObservations } from "@/server/db/schema";
 import { createAccount } from "@/server/services/accounts";
 import {
 	estimatePurchaseImpact,
 	getFinancialProfile,
 	getInvestmentRules,
 	listObservations,
+	markObservationsRead,
 	reserveFor,
 	reviewDue,
 	updateFinancialProfile,
@@ -69,6 +71,67 @@ d("Hr. Körner persistence against PostgreSQL", () => {
 			impactMinor: 1_000_000,
 			status: "open",
 		});
+	});
+
+	it("acknowledges only the owner's displayed findings and keeps them read across reviews", async () => {
+		const [finding] = await listObservations(userId);
+		expect(finding.readAt).toBeNull();
+		expect(await markObservationsRead(otherUserId, [finding.id])).toEqual({
+			read: 0,
+		});
+		expect((await listObservations(userId))[0].readAt).toBeNull();
+		expect(await markObservationsRead(userId, [finding.id])).toEqual({
+			read: 1,
+		});
+		const [read] = await listObservations(userId);
+		expect(read.readAt).toBeInstanceOf(Date);
+		expect(read.status).toBe("open");
+		expect(await markObservationsRead(userId, [finding.id])).toEqual({
+			read: 0,
+		});
+		await reviewDue(userId, true);
+		expect((await listObservations(userId))[0].readAt).toEqual(read.readAt);
+		await db
+			.update(financialObservations)
+			.set({ status: "resolved" })
+			.where(eq(financialObservations.id, finding.id));
+		await reviewDue(userId, true);
+		expect((await listObservations(userId))[0]).toMatchObject({
+			status: "open",
+			readAt: null,
+		});
+	});
+
+	it("suppresses legacy nags immediately and retires open or snoozed age reminders", async () => {
+		const legacy = {
+			userId: otherUserId,
+			type: "stale_asset_valuation",
+			severity: "review" as const,
+			title: "Wert prüfen",
+			explanation: "Alt",
+			evidence: {},
+			sourceEntities: [],
+			confidence: "high",
+			actionable: true,
+		};
+		await db.insert(financialObservations).values([
+			{ ...legacy, key: "stale_valuation:asset:old" },
+			{
+				...legacy,
+				key: "stale_valuation:asset:snoozed",
+				status: "snoozed",
+				snoozedUntil: new Date(Date.now() + 86400000),
+			},
+			{ ...legacy, key: "recurring_leak:old", type: "repeated_small_leak" },
+		]);
+		expect(await listObservations(otherUserId)).toEqual([]);
+		await reviewDue(otherUserId, true);
+		const retired = await listObservations(otherUserId);
+		expect(retired).toHaveLength(3);
+		expect(retired.every((row) => row.status === "resolved")).toBe(true);
+		await db
+			.delete(financialObservations)
+			.where(eq(financialObservations.userId, otherUserId));
 	});
 
 	it("keeps the owner's investment rules apart from the shared profile", async () => {

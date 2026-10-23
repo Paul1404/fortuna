@@ -119,6 +119,11 @@ export const router = {
 		observations: authed.handler(({ context }) =>
 			hrKoernerSvc.listObservations(context.user.id),
 		),
+		markObservationsRead: mutation
+			.input(v.object({ ids: v.pipe(v.array(id), v.maxLength(200)) }))
+			.handler(({ context, input }) =>
+				hrKoernerSvc.markObservationsRead(context.user.id, input.ids),
+			),
 		updateObservation: mutation
 			.input(FinancialObservationUpdate)
 			.handler(({ context, input }) =>

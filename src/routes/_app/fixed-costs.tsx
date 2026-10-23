@@ -266,11 +266,11 @@ function FixedCostsPage() {
 					}
 				/>
 				<StatTile
-					label="Überfällig"
+					label="Noch nicht erkannt"
 					value={String(overdue)}
 					detail={
 						<span className="text-text-muted">
-							erwartet, aber nicht abgebucht
+							erwartet, ohne passende Buchung
 						</span>
 					}
 				/>
@@ -471,7 +471,7 @@ function ItemTable({
 									{contract ? <Badge>Vertrag</Badge> : null}
 									{item.viaPayroll ? <Badge>über Gehalt</Badge> : null}
 									{payment?.overdue && !item.viaPayroll ? (
-										<Badge variant="warning">überfällig</Badge>
+										<Badge>noch nicht erkannt</Badge>
 									) : null}
 									<MissionBadge item={item} />
 								</span>
@@ -1130,23 +1130,6 @@ function ContractFacts({
 					</Button>
 				</div>
 			) : null}
-			<div>
-				<div className="flex items-center justify-between text-xs">
-					<span className="text-text-secondary">Dokumentation</span>
-					<strong>{contract.completeness}%</strong>
-				</div>
-				<div className="mt-1 h-2 overflow-hidden rounded bg-chart-neutral-1">
-					<div
-						className="h-full bg-brand"
-						style={{ width: `${contract.completeness}%` }}
-					/>
-				</div>
-				{contract.missingFields.length ? (
-					<p className="mt-1 text-[11px] text-warning">
-						Fehlt: {contract.missingFields.join(", ")}
-					</p>
-				) : null}
-			</div>
 			{contract.documents.length ? (
 				<div className="flex flex-wrap gap-2">
 					{contract.documents.map((document) => (

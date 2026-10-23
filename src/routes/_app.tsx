@@ -71,12 +71,6 @@ function AppLayout() {
 				if (result.attempted > 0 || result.expired > 0) await invalidate();
 				if (result.imported > 0 || result.accountsLinked > 0)
 					koernerPostSyncReview.mutate(undefined);
-				if (result.imported > 0 || result.accountsLinked > 0)
-					toast.success(
-						`Bank automatisch aktualisiert: ${result.imported} neue Buchungen`,
-					);
-				else if (result.attempted > 0 && result.failed === 0)
-					toast.info("Bank geprüft: keine neuen Buchungen");
 				// Hr. Körner filed what repeats the owner's own decisions straight
 				// after the import; say so once, with the undo beside it.
 				const filed = result.filed;

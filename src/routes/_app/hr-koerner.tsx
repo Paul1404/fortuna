@@ -9,9 +9,11 @@ import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { NativeSelect } from "@/components/ui/input";
 import { addMonths, todayIso } from "@/domain/dates";
 import { estimateMonthsToGoal } from "@/domain/hr-koerner";
+import { isActionableProblem } from "@/domain/hr-koerner-notifications";
 import { germanMonthName } from "@/domain/monthly-recap";
 import { Money, useFormat } from "@/lib/format";
 import { reportError, useInvalidateAll } from "@/lib/forms";
+import { useObservationReads } from "@/lib/observation-reads";
 import { orpc } from "@/lib/orpc";
 
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -38,13 +40,13 @@ export const Route = createFileRoute("/_app/hr-koerner")({
 				orpc.hrKoerner.profile.queryOptions(),
 			),
 		]),
-	head: () => ({ meta: [{ title: "Erledigt und entschieden · Fortuna" }] }),
+	head: () => ({ meta: [{ title: "Hinweise und Entscheidungen | Fortuna" }] }),
 	component: KoernerPage,
 });
 
 const severityLabel = {
 	info: "Hinweis",
-	notable: "Auffällig",
+	notable: "Beobachtung",
 	review: "Prüfen",
 	urgent: "Dringend",
 } as const;
@@ -177,6 +179,7 @@ function KoernerPage() {
 			onError: reportError,
 		}),
 	);
+	useObservationReads();
 	const open = observations.filter((row) => row.status === "open");
 	const snoozed = observations.filter((row) => row.status === "snoozed");
 	const closed = observations.filter(
@@ -194,14 +197,16 @@ function KoernerPage() {
 							<h3 className="text-sm font-semibold text-text">{row.title}</h3>
 							<Badge
 								variant={
-									row.severity === "urgent"
+									isActionableProblem(row) && row.severity === "urgent"
 										? "negative"
-										: row.severity === "review"
+										: isActionableProblem(row) && row.severity === "review"
 											? "warning"
 											: "info"
 								}
 							>
-								{severityLabel[row.severity]}
+								{isActionableProblem(row)
+									? severityLabel[row.severity]
+									: "Beobachtung"}
 							</Badge>
 						</div>
 						<p className="mt-1 text-sm text-text-secondary">
@@ -212,7 +217,7 @@ function KoernerPage() {
 								Finanzieller Kontext:{" "}
 								<Money amountMinor={row.impactMinor} currency={row.currency} />
 								{row.type === "repeated_small_leak"
-									? " pro Jahr, keine behauptete Ersparnis"
+									? " pro Jahr"
 									: row.type === "lifestyle_creep"
 										? " mehr Fixkosten im Monat"
 										: ""}
@@ -274,7 +279,7 @@ function KoernerPage() {
 	return (
 		<div className="space-y-5">
 			<PageHeader
-				title="Erledigt und entschieden"
+				title="Hinweise und Entscheidungen"
 				subtitle="Was Hr. Körner festgestellt hat und wie Sie entschieden haben"
 				actions={
 					<>
@@ -299,6 +304,15 @@ function KoernerPage() {
 				{health?.lastErrorClass ? " · Prüfung fehlgeschlagen" : ""}
 			</p>
 			<section className="space-y-3">
+				<h2 className="font-display text-xl">Aktuelle Hinweise</h2>
+				{open.length ? (
+					open.map(renderCard)
+				) : (
+					<p className="text-sm text-text-muted">Keine aktuellen Hinweise.</p>
+				)}
+			</section>
+
+			<section className="space-y-3">
 				<h2 className="font-display text-xl">
 					Erledigt und bewusst entschieden ({closed.length})
 				</h2>
@@ -316,14 +330,7 @@ function KoernerPage() {
 					<p className="text-sm text-text-muted">Nichts pausiert.</p>
 				)}
 			</section>
-			{/* Open findings are worked on the desk; they stay listed here so
-			    nothing depends on which of them the desk turns into a task. */}
-			<details className="space-y-3">
-				<summary className="cursor-pointer text-sm font-semibold">
-					Noch offen ({open.length})
-				</summary>
-				<div className="mt-3 space-y-3">{open.map(renderCard)}</div>
-			</details>
+
 			<RecapHistory />
 			{profile.weeklyReportEnabled ? (
 				<Card>

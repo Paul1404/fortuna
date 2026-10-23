@@ -4,6 +4,7 @@ import {
 	composeDeskTasks,
 	type DeskObservation,
 	filedSummary,
+	investmentOpportunity,
 	liquidityStructure,
 } from "@/domain/desk";
 import type { DeskFiled, DeskToday, LazyCash } from "@/domain/desk-contract";
@@ -206,6 +207,8 @@ export async function deskToday(userId: string): Promise<DeskToday> {
 		)
 		.map((row) => ({
 			id: row.id,
+			type: row.type,
+			actionable: row.actionable,
 			key: row.key,
 			severity: row.severity,
 			title: row.title,
@@ -231,10 +234,6 @@ export async function deskToday(userId: string): Promise<DeskToday> {
 		baseCurrency,
 		bookings,
 		observations,
-		freeMoney:
-			invest.depotCount > 0 && plan.ready
-				? { bankMinor: plan.bankFreeMinor, brokerMinor: plan.brokerFreeMinor }
-				: null,
 		quality: quality.entries,
 	});
 
@@ -242,6 +241,11 @@ export async function deskToday(userId: string): Promise<DeskToday> {
 		asOf: today,
 		baseCurrency,
 		tasks,
+		investmentOpportunity: investmentOpportunity(
+			invest.depotCount > 0 && plan.ready
+				? { bankMinor: plan.bankFreeMinor, brokerMinor: plan.brokerFreeMinor }
+				: null,
+		),
 		liquidity: liquidityStructure({
 			netWorth: worth.input,
 			contracts: contractRows,

@@ -19,7 +19,7 @@ import { VALUATION_SOURCES } from "@/lib/schemas";
 /**
  * Updating what a Sachwert is worth: the new value, dated today unless the
  * owner says otherwise, saved as a valuation in its history. The desk's
- * stale-value tasks and a tap on an asset row both land here.
+ * A tap on an asset row or an explicit update link lands here.
  */
 export function AssetValueDialog({
 	asset,
