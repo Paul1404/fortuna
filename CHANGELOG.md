@@ -3,6 +3,18 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.65.0 - 2026-10-23
+
+- Die Systemprüfung kontrolliert die Datenbankstruktur und den eingerichteten
+  Dateispeicher. Fehler verhindern die Freigabe einer neuen Bereitstellung.
+  Ohne Dateispeicher bleibt die verschlüsselte Ablage in der Datenbank gültig.
+- Alle direkten Bibliotheken sind auf den neuesten stabilen Stand aktualisiert;
+  die bestehende Nitro-Vorabversion bleibt exakt auf den aktuellen Stand festgelegt.
+  Bun läuft in Version 1.4.4, die Scalable-Anbindung mit der offiziellen CLI 1.2.0.
+- Die Ordervorschau zeigt auch die zusätzlichen Pflichtfelder der neuen CLI.
+  Die erlaubten Aufträge und die Bestätigung vor jeder Order bleiben unverändert.
+- Die automatischen Prüfungen laden jetzt auch die fertige Anwendung im Browser.
+
 ## 0.64.0 - 2026-10-23
 
 - Der Schreibtisch zeigt Entscheidungen und konkrete Liquiditätsprobleme.

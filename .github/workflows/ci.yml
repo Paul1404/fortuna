@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
-      - uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+      - uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: false
@@ -35,8 +35,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
+      - name: Dependency audit
+        run: bun audit
       - name: Lint & format
         run: bun run check
       - name: Typecheck
@@ -48,6 +50,7 @@ jobs:
 
   integration:
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     services:
       postgres:
         image: postgres:17-alpine
@@ -67,13 +70,37 @@ jobs:
       BETTER_AUTH_SECRET: integration-test-secret-at-least-32-bytes-long # gitleaks:allow - isolated CI fixture, never deployed
       BETTER_AUTH_URL: http://127.0.0.1:3000
       FORTUNA_INTEGRATION_TEST: "1"
+      OWNER_EMAIL: smoke@example.invalid
+      OWNER_PASSWORD: smoke-fixture-password-only # gitleaks:allow - disposable CI owner
+      OWNER_NAME: Test Owner
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
       - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
         with:
-          bun-version: 1.4.2
+          bun-version: 1.4.4
       - run: bun install --frozen-lockfile
       - name: Apply migrations
         run: bun run db:bootstrap:local && bun run db:migrate
       - name: Integration tests
         run: bun run test:integration
+      - name: Install browser
+        run: bunx playwright install --with-deps chromium
+      - name: Build and exercise the production server
+        run: |
+          bun run build
+          NODE_ENV=production bun run start > /tmp/fortuna-smoke-server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          ready=false
+          for attempt in $(seq 1 30); do
+            if curl --fail --silent http://127.0.0.1:3000/api/health > /dev/null; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [ "$ready" != true ]; then
+            echo "Production server did not become ready"
+            exit 1
+          fi
+          bun run smoke http://127.0.0.1:3000

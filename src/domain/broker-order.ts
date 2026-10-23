@@ -38,6 +38,8 @@ export const DISCLOSURE_SECTIONS: readonly Section[] = [
 			{ path: "/result/intent/isin", label: "ISIN" },
 			{ path: "/result/intent/shares", label: "Stück", side: "sell" },
 			{ path: "/result/intent/order_type", label: "Ordertyp" },
+			{ path: "/result/intent/limit_price", label: "Limitpreis" },
+			{ path: "/result/intent/stop_price", label: "Stoppreis" },
 			{
 				path: "/result/intent/venue_override",
 				label: "Handelsplatz (vorgegeben)",

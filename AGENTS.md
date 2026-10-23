@@ -385,7 +385,7 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
     amount + 1 % (a string; the CLI refuses a TOML float). That binds the
     submission to what was confirmed; it is not an owner limit.
   - The CLI's rule `pre_trade_full_disclosure_v1` is law here: phase 1's
-    every required field (`requiredLeafPaths`, pinned to CLI v1.1.0 by
+    every required field (`requiredLeafPaths`, pinned to CLI v1.2.0 by
     `tests/fixtures/scalable-trade-leaves.json`) is shown unchanged, null as
     `null`, missing as "(nicht geliefert)", and phase 2 runs only from the
     owner's separate confirmation (the dialog's button plus `confirm()`),
@@ -500,6 +500,17 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 - Every push to `main` deploys to production with check suites disabled;
   prove changes locally first. The pre-deploy migrator aborts the release on
   failure.
+- `/api/health` is deployment readiness, not an authenticated workflow test or
+  continuous monitoring. It checks the table/column contract derived from both
+  Drizzle schemas without reading owner records. Configured object storage must
+  answer; partial configuration fails. No storage configuration intentionally
+  uses encrypted PostgreSQL storage and reports `objectStorage: null`.
+  `ok: false` means HTTP 503, including a schema or storage failure. Probes run
+  concurrently, have a five-second response deadline, coalesce concurrent calls
+  and cache success for five seconds or failure for one. HTTP responses are
+  `no-store`. Never call bank, broker or model services from a health probe.
+  CI exercises the built server and all authenticated routes against disposable
+  PostgreSQL; those browser checks complement readiness, not replace it.
 - Secrets are `preserve()`d in IaC and live only in Railway.
 - User-uploaded provider application keys live in `provider_credentials`, are
   validated server-side, encrypted through `src/server/crypto.ts`, and are
@@ -829,6 +840,12 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 - Agent worktrees under `.claude/worktrees/` carry their own `biome.json`, and
   `bun run check` from the repo root then fails on nested root configs. Run
   `bunx biome check src tests scripts` while they exist.
+- Biome's `useMathMinMax` suggestion is numeric. ISO date strings must keep
+  lexical comparisons; this rule is disabled because it suggests unsafe numeric
+  fixes for them. Never replace them with `Math.min` or `Math.max` (NaN).
+- The `esbuild` override removes Drizzle Kit's legacy loader's vulnerable copy.
+  Recheck the override when updating Drizzle Kit; verify config loading and
+  `db:generate` rather than accepting a clean audit alone.
 - Drizzle runs every pending migration in ONE transaction, so a migration can
   never use an enum value another migration just added — Postgres answers
   "unsafe use of new value", and splitting it across two files does not help.

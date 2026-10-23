@@ -6,6 +6,8 @@ import {
 	S3Client,
 } from "@aws-sdk/client-s3";
 
+import type { StorageMode } from "./health-check";
+
 type ObjectStorageConfig = {
 	endpoint: string;
 	region: string;
@@ -62,6 +64,19 @@ function storage() {
 
 export function objectStorageAvailable() {
 	return Boolean(loadConfig());
+}
+
+/** Missing storage uses encrypted PostgreSQL; partial configuration is an error. */
+export function objectStorageMode(): StorageMode {
+	if (loadConfig()) return "object_storage";
+	const configured = [
+		"OBJECT_STORAGE_ENDPOINT",
+		"OBJECT_STORAGE_REGION",
+		"OBJECT_STORAGE_BUCKET",
+		"OBJECT_STORAGE_ACCESS_KEY_ID",
+		"OBJECT_STORAGE_SECRET_ACCESS_KEY",
+	].some((name) => Boolean(process.env[name]?.trim()));
+	return configured ? "invalid" : "database";
 }
 
 export async function objectStorageReady() {
