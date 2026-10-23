@@ -1,6 +1,5 @@
 import { useMutation, useQuery, useSuspenseQuery } from "@tanstack/react-query";
 import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
-import { useEffect } from "react";
 import { toast } from "sonner";
 import { RecapSentences } from "@/components/desk-recap";
 import { PageHeader } from "@/components/page-header";
@@ -14,6 +13,7 @@ import { isActionableProblem } from "@/domain/hr-koerner-notifications";
 import { germanMonthName } from "@/domain/monthly-recap";
 import { Money, useFormat } from "@/lib/format";
 import { reportError, useInvalidateAll } from "@/lib/forms";
+import { useObservationReads } from "@/lib/observation-reads";
 import { orpc } from "@/lib/orpc";
 
 const MONTH_PATTERN = /^\d{4}-(0[1-9]|1[0-2])$/;
@@ -179,17 +179,7 @@ function KoernerPage() {
 			onError: reportError,
 		}),
 	);
-	const { mutate: markRead } = useMutation(
-		orpc.hrKoerner.markObservationsRead.mutationOptions({
-			onSuccess: () => invalidate(),
-		}),
-	);
-	useEffect(() => {
-		const ids = observations
-			.filter((row) => row.status === "open" && row.readAt === null)
-			.map((row) => row.id);
-		if (ids.length) markRead({ ids });
-	}, [observations, markRead]);
+	useObservationReads();
 	const open = observations.filter((row) => row.status === "open");
 	const snoozed = observations.filter((row) => row.status === "snoozed");
 	const closed = observations.filter(

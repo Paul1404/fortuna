@@ -605,7 +605,8 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   units. Optional observations never enter the desk or light the sidebar dot.
   `inAppNotificationEligible` requires an open actionable liquidity problem with
   `read_at = null`. The session-only `markObservationsRead` acknowledges only
-  displayed IDs, scoped to the owner, without resolving them. Repeated reviews
+  displayed IDs, on the desk or the observations page, scoped to the owner,
+  without resolving them. Repeated reviews
   preserve read status; a resolved problem returning resets it. Successful
   background bank checks stay silent; auto-filing retains its undo notice.
   Dismissal and snoozing must never be bypassed by another reminder path.

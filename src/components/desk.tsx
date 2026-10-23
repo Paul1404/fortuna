@@ -7,7 +7,7 @@ import {
 	Landmark,
 	RotateCcw,
 } from "lucide-react";
-import { Suspense, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CategoryReviewDialog } from "@/components/category-review";
 import { InvestDialog } from "@/components/investment-advice";
@@ -26,6 +26,7 @@ import type {
 } from "@/domain/desk-contract";
 import { Money, useFormat } from "@/lib/format";
 import { reportError, useInvalidateAll } from "@/lib/forms";
+import { useObservationReads } from "@/lib/observation-reads";
 import { orpc } from "@/lib/orpc";
 import { cn } from "@/lib/utils";
 
@@ -130,6 +131,14 @@ type Opened = { kind: "review" } | { kind: "invest" };
 export function DeskSections({ today }: { today: DeskToday }) {
 	const [opened, setOpened] = useState<Opened | null>(null);
 	const tasks = today.tasks;
+	const visibleObservationIds = useMemo(
+		() =>
+			tasks.flatMap((task) =>
+				task.action.kind === "observation" ? [task.action.observationId] : [],
+			),
+		[tasks],
+	);
+	useObservationReads(visibleObservationIds);
 
 	function open(task: DeskTask) {
 		if (task.action.kind === "review_bookings") setOpened({ kind: "review" });
