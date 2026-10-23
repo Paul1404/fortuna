@@ -2,6 +2,8 @@
 	"buy": [
 		"/result/intent/isin",
 		"/result/intent/order_type",
+		"/result/intent/limit_price",
+		"/result/intent/stop_price",
 		"/result/intent/venue_override",
 		"/result/intent/locale",
 		"/result/market_quote/mid_price",
@@ -76,6 +78,8 @@
 		"/result/intent/isin",
 		"/result/intent/shares",
 		"/result/intent/order_type",
+		"/result/intent/limit_price",
+		"/result/intent/stop_price",
 		"/result/intent/venue_override",
 		"/result/intent/locale",
 		"/result/market_quote/mid_price",

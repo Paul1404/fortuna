@@ -16,7 +16,7 @@ import {
 } from "@/server/providers/investment/scalable-hosted-cli";
 import leaves from "./fixtures/scalable-trade-leaves.json";
 
-// `sc capabilities --json` of CLI v1.1.0: the fields the CLI requires to be
+// `sc capabilities --json` of CLI v1.2.0: the fields the CLI requires to be
 // shown before phase 2. The dialog must render every one of them.
 describe("pre-trade disclosure", () => {
 	it("covers exactly the CLI's required fields, per side", () => {
@@ -36,7 +36,7 @@ describe("pre-trade disclosure", () => {
 			{ result: { intent: { isin: "LU2903252349" } } },
 			"buy",
 		).flatMap((section) => section.rows);
-		expect(rows).toHaveLength(71);
+		expect(rows).toHaveLength(73);
 		expect(rows[0]).toMatchObject({ lines: ["LU2903252349"] });
 	});
 

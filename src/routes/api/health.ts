@@ -1,31 +1,16 @@
 import { createFileRoute } from "@tanstack/react-router";
-import { sql } from "drizzle-orm";
-import { db } from "@/server/db";
-import { objectStorageReady } from "@/server/object-storage";
-import packageJson from "../../../package.json";
+import { healthCheck } from "@/server/health";
 
-// Health check for Railway. Verifies the database answers; reveals nothing
-// about the data.
+/** Readiness for deployments and external monitors, without owner data. */
 export const Route = createFileRoute("/api/health")({
 	server: {
 		handlers: {
 			GET: async () => {
-				const started = performance.now();
-				try {
-					await db.execute(sql`select 1`);
-					return Response.json({
-						ok: true,
-						db: true,
-						objectStorage: await objectStorageReady(),
-						version: packageJson.version,
-						latencyMs: Math.round(performance.now() - started),
-					});
-				} catch {
-					return Response.json(
-						{ ok: false, db: false, version: packageJson.version },
-						{ status: 503 },
-					);
-				}
+				const body = await healthCheck();
+				return Response.json(body, {
+					status: body.ok ? 200 : 503,
+					headers: { "Cache-Control": "no-store" },
+				});
 			},
 		},
 	},

@@ -63,7 +63,7 @@ The [official CSV export guide](https://help.scalable.capital/de-AT/kontoverwalt
 ## Implementation and verification
 
 ### What Fortuna implements
-Fortuna packages Scalable's signed official CLI v1.1.0 (since 0.52.0) in its glibc-based
+Fortuna packages Scalable's signed official CLI v1.2.0 (since 0.65.0) in its glibc-based
 runtime image. The build verifies Scalable's minisign checksum manifest and a
 pinned SHA-256 digest. **Mit Scalable verbinden** in Fortuna starts the CLI's
 official device-code login. The owner opens the Scalable URL and personally
