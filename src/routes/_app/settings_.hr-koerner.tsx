@@ -331,13 +331,13 @@ function AlertsCard({ profile }: { profile: Profile }) {
 										? toAmountInput(profile.largePurchaseThresholdMinor)
 										: ""
 								}
-								placeholder="Standard: 50"
+								placeholder="Standard: 250"
 							/>
 						</Field>
 						<Field
 							label="Auffällig ab Faktor"
 							htmlFor="k-multiplier"
-							hint="Vergleich mit dem Median früherer Ausgaben beim selben Händler."
+							hint="Nur bei aktivierter Ausgabenanalyse, mit mindestens sechs früheren Käufen beim selben Händler."
 						>
 							<Input
 								id="k-multiplier"
@@ -349,15 +349,17 @@ function AlertsCard({ profile }: { profile: Profile }) {
 								defaultValue={profile.unusualSpendMultiplierBps / 10000}
 							/>
 						</Field>
-						<Field label="Hinweisempfindlichkeit" htmlFor="k-sensitivity">
+						<Field label="Zusätzliche Analysen" htmlFor="k-sensitivity">
 							<NativeSelect
 								id="k-sensitivity"
 								name="sensitivity"
 								defaultValue={profile.alertSensitivity}
 							>
-								<option value="quiet">Ruhig</option>
-								<option value="balanced">Ausgewogen</option>
-								<option value="detailed">Ausführlich</option>
+								<option value="quiet">Nur Liquiditätsprobleme</option>
+								<option value="balanced">
+									Auch Preisänderungen und Trends
+								</option>
+								<option value="detailed">Auch Ausgaben und Abos</option>
 							</NativeSelect>
 						</Field>
 					</div>

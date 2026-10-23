@@ -3,6 +3,17 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.64.0 - 2026-10-23
+
+- Der Schreibtisch zeigt Entscheidungen und konkrete Liquiditätsprobleme.
+  Ältere Bewertungen werden nicht mehr zu wiederkehrenden Aufgaben.
+- Freies Geld bleibt als freiwillige Anlagemöglichkeit sichtbar. Preisänderungen
+  und Trends stehen unter Hinweise, Ausgaben- und Aboanalysen nur auf Wunsch.
+- Gelesene Hinweise löschen den Benachrichtigungspunkt, ohne erledigt sein zu
+  müssen. Ausblenden und Pausieren bleiben wirksam.
+- Erfolgreiche automatische Bankprüfungen bleiben still. Vertragsunterlagen
+  bekommen keine Vollständigkeitsnote mehr; Datenstände bleiben sachlich sichtbar.
+
 ## 0.63.1 - 2026-10-14
 
 - Forderungen können auch aus ausstehenden Ausgaben angelegt werden. Sie

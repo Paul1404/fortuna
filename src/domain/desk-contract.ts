@@ -11,25 +11,8 @@ import type { ReservePot } from "./progress";
 export type DeskAction =
 	/** Open the categorisation batch review. */
 	| { kind: "review_bookings" }
-	/**
-	 * Open "Anlegen": the transfer ticket for bank money above the reserve
-	 * (the owner makes it at the bank; Fortuna never moves bank money) and
-	 * the buys, each placed only through the broker-order dialog.
-	 */
-	| {
-			kind: "invest_money";
-			/** Bank money above what stays liquid, when it is worth a transfer. */
-			bankMinor: number;
-			/** Free broker cash. */
-			brokerMinor: number;
-	  }
-	/**
-	 * Mark, snooze or dismiss a Hr. Körner observation; `href` is where the
-	 * thing it is about is fixed (a stale value's update), when there is one.
-	 */
-	| { kind: "observation"; observationId: string; href?: string }
-	/** Update a stale value (asset valuation, liability or receivable balance). */
-	| { kind: "update_value"; href: string }
+	/** Mark, snooze or dismiss an actionable financial finding. */
+	| { kind: "observation"; observationId: string }
 	/** Anything else: a plain link to the page that handles it. */
 	| { kind: "open"; href: string };
 
@@ -91,6 +74,8 @@ export type DeskToday = {
 	asOf: string;
 	baseCurrency: string;
 	tasks: DeskTask[];
+	/** Optional, never a task or warning. */
+	investmentOpportunity: { bankMinor: number; brokerMinor: number } | null;
 	liquidity: LiquidityStructure;
 	lazyCash: LazyCash | null;
 	/** Liquid bank cash against the reserve (`reservePot`); null without one. */

@@ -30,7 +30,7 @@ import { ASSET_CATEGORIES } from "@/lib/schemas";
 
 export const Route = createFileRoute("/_app/assets/$id")({
 	// `?update=1` opens the value update at once, for links whose only
-	// purpose is a new value (the desk's stale-value tasks).
+	// purpose is a new value.
 	validateSearch: (raw: Record<string, unknown>): { update?: true } =>
 		raw.update === true || raw.update === "1" || raw.update === 1
 			? { update: true }

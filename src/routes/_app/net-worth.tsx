@@ -10,7 +10,6 @@ import { NetWorthProgress } from "@/components/net-worth-progress";
 import { PageHeader } from "@/components/page-header";
 import { StatRow, StatTile } from "@/components/stat-tile";
 import { TickingMoney } from "@/components/ticking-money";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Input, NativeSelect } from "@/components/ui/input";
@@ -313,13 +312,7 @@ function WealthPage() {
 								</div>
 								<div>
 									<p className="label-caps">Bewertung</p>
-									<Badge
-										variant={
-											source.confidence === "stale" ? "negative" : "default"
-										}
-									>
-										{source.confidence === "stale" ? "veraltet" : "automatisch"}
-									</Badge>
+									<p className="text-sm text-text-secondary">Letzter Stand</p>
 									<p className="mt-1 text-xs text-text-muted">
 										{source.valuationAt
 											? f.dateTime(source.valuationAt)

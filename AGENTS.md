@@ -60,17 +60,17 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 ## Domain rules that save time
 
 - `/` is Hr. Körner's desk and the only home. The desk renders `desk.today`
-  (`src/domain/desk.ts`) and works out no task itself: "Heute zu tun", the
-  liquidity structure (built from `currentNetWorthInput`, so it adds up to
-  total assets) and lazy cash (the "Anlegen" plan's `bankFreeMinor`). Money
-  has one task, "Freies Geld", naming bank money above what stays liquid
-  (from 500 €) and free depot cash (from 50 €); its one action opens
-  "Anlegen". Nothing moves money without the owner's confirmation.
-  "Erledigt" on the transfer lives only in the browser
-  (`fortuna-desk-done-v1`, 3 days). `NetWorthHero` is rendered by the desk
-  only. The chat exists once, in `src/components/copilot-chat.tsx`; the
-  message list scrolls itself, never with `scrollIntoView`, or the desk jumps
-  to the chat.
+  (`src/domain/desk.ts`) and computes no task itself. "Braucht Ihre Entscheidung"
+  contains uncategorised bookings, actionable liquidity problems and missing FX
+  rates that exclude amounts from totals. Optional observations, old valuations
+  and free cash are never tasks. `investmentOpportunity` keeps "Anlegen"
+  available quietly beside liquidity, including broker-only cash. The liquidity
+  structure uses `currentNetWorthInput`, so it adds up to total assets.
+  Nothing moves money without the owner's confirmation. "Erledigt" on a transfer
+  lives only in the browser (`fortuna-desk-done-v1`, 3 days). `NetWorthHero` is
+  rendered by the desk only. The chat exists once, in
+  `src/components/copilot-chat.tsx`; the message list scrolls itself, never with
+  `scrollIntoView`, or the desk jumps to the chat.
 - Übersicht and Rückblick were merged into Vermögen (`/net-worth`): KPIs,
   one history chart with metric, interval, period and mode pickers (saved
   views stay under `fortuna-recap-views-v1`), change by period, and the
@@ -428,14 +428,16 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   payment, the contract naming it and its Sparmissionen into one item. The
   booked amount leads and a divergence from the contract stays visible. A
   payment with no linked booking says so, and `recurring.linkMatches` links
-  only matching unlinked bookings, recomputed on the server. `/recurring`,
+  only matching unlinked bookings, recomputed on the server. An expected payment
+  without a matching booking says "noch nicht erkannt", not "überfällig": the
+  absence of an imported booking does not prove a missed payment. `/recurring`,
   `/contracts` and `/optimizations` redirect there.
 - Optimizations are motivational cost comparisons, not booked money. Calculate
   projections from monthly current/alternative costs and one-time switching
   costs; never add potential or realized optimization figures to net worth.
-- Contracts compute completeness from provider, contract number, cost and
-  cadence, dates, links and documents. Insurance requires a `policy` document
-  for 100 percent. Document bytes and extracted text are AES-GCM encrypted in
+- Contract documents are optional documentation, never a completion target or
+  warning checklist. Missing facts required by a forecast remain explained beside
+  that forecast. Document bytes and extracted text are AES-GCM encrypted in
   PostgreSQL; never expose encrypted content or extracted text through lists,
   MCP or logs.
 - Long-term behaviour features (owner's decisions of 28.09.2026):
@@ -594,6 +596,21 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   forecast. Where a recurring payment is linked, `proposeContractDetails`
   offers what the bookings know — proposed, never applied: a contract is a
   document, and a value read off the account is evidence about it.
+- Fortuna stays calm by default. `observationEnabled` applies both when generating
+  findings and when reading existing ones. `quiet` retains concrete liquidity
+  problems; a reserve target shortfall is `review`, and negative liquid cash
+  is `urgent`. `balanced` also offers price changes and trends as observations;
+  `detailed` opts into spending and subscription analysis. Outlier analysis needs
+  at least six earlier purchases; its default floor is 250 in base-currency major
+  units. Optional observations never enter the desk or light the sidebar dot.
+  `inAppNotificationEligible` requires an open actionable liquidity problem with
+  `read_at = null`. The session-only `markObservationsRead` acknowledges only
+  displayed IDs, scoped to the owner, without resolving them. Repeated reviews
+  preserve read status; a resolved problem returning resets it. Successful
+  background bank checks stay silent; auto-filing retains its undo notice.
+  Dismissal and snoozing must never be bypassed by another reminder path.
+  The Copilot follows the same policy and never pursues complete documentation
+  or asks for an update solely because a valuation is old.
 - Hr. Körner's explicit numeric goals and alert thresholds live in
   `financial_profiles`, not free-form Copilot memories. The pure observation
   engine lives in `src/domain/hr-koerner.ts`; persisted findings are keyed per
@@ -885,10 +902,11 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 - Visible user content wraps instead of using `truncate`. Wide tables own an
   `overflow-x-auto` container, and date inputs keep enough inline width for
   Safari's localized value and picker control.
-- The dashboard and recap explain outdated financial data with the affected
-  item's name and age: missing dates or values older than 30 days need an
-  update. Do not replace this with an unexplained composite percentage. The
-  holdings Sankey uses wrapped labels and bounded label gutters so long names
+- Age alone never makes a value wrong or creates an update reminder. Show its
+  date quietly beside the relevant value; do not add age-warning chips to page
+  headers or KPIs. Keep genuine calculation gaps (missing FX, excluded values),
+  authentication failures and order disclosures visible where they matter.
+  The holdings Sankey uses wrapped labels and bounded label gutters so long names
   cannot squeeze the flow columns.
 - Chart axis ticks must stay inside the plotted domain and SVG bounds. Keep
   bottom padding for date labels so chart text cannot bleed into a following

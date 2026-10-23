@@ -12,6 +12,18 @@ import {
 } from "@/server/services/copilot";
 
 describe("Fortuna Copilot", () => {
+	it("does not turn valuations or optional documentation into completion chores", () => {
+		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain(
+			"kein Anlass für eine Aktualisierungsaufforderung",
+		);
+		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain(
+			"Dokumente sind optionale Dokumentation",
+		);
+		expect(COPILOT_DEVELOPER_INSTRUCTIONS).not.toContain(
+			"Ziel ist 100 Prozent",
+		);
+	});
+
 	it("acts as a factual accountant without dialect who asks one question", () => {
 		expect(COPILOT_DEVELOPER_INSTRUCTIONS).toContain(
 			"Fortunas Buchhalter und privater Finanzcontroller",

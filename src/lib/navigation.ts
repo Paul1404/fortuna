@@ -67,7 +67,7 @@ export const HIDEABLE_NAV_ITEMS = ALL_NAV_ITEMS.filter(
  */
 export const PALETTE_ONLY_ITEMS: NavItem[] = [
 	{ href: "/copilot", label: "Gespräch", icon: MessageCircleMore },
-	{ href: "/hr-koerner", label: "Erledigt und entschieden", icon: History },
+	{ href: "/hr-koerner", label: "Hinweise und Entscheidungen", icon: History },
 	{ href: "/settings/data-sources", label: "Datenquellen", icon: Plug },
 	{ href: "/fixed-costs", label: "Verträge", icon: FileCheck2 },
 ];

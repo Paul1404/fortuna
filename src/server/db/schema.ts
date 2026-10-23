@@ -534,6 +534,7 @@ export const financialObservations = pgTable(
 		lastDetectedAt: timestamp("last_detected_at", { withTimezone: true })
 			.defaultNow()
 			.notNull(),
+		readAt: timestamp("read_at", { withTimezone: true }),
 		dismissedAt: timestamp("dismissed_at", { withTimezone: true }),
 		resolvedAt: timestamp("resolved_at", { withTimezone: true }),
 		snoozedUntil: timestamp("snoozed_until", { withTimezone: true }),

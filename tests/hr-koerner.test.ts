@@ -38,7 +38,6 @@ const base: ReviewInput = {
 	},
 	transactions: [],
 	recurring: [],
-	staleValuations: [],
 };
 
 describe("Hr. Körner deterministic review", () => {
@@ -48,7 +47,7 @@ describe("Hr. Körner deterministic review", () => {
 			{
 				type: "liquidity_below_floor",
 				impactMinor: 100_000,
-				severity: "urgent",
+				severity: "review",
 			},
 		]);
 		expect(
@@ -60,8 +59,20 @@ describe("Hr. Körner deterministic review", () => {
 		).toEqual([]);
 	});
 
+	it("does not call a reserve target shortfall urgent while cash stays positive", () => {
+		expect(
+			detectFinancialObservations({
+				...base,
+				cashMinor: 999_999,
+			})[0].severity,
+		).toBe("review");
+		expect(
+			detectFinancialObservations({ ...base, cashMinor: -1 })[0].severity,
+		).toBe("urgent");
+	});
+
 	it("flags an outlier from actual merchant history without claiming fraud or product ownership", () => {
-		const transactions = ["1", "2", "3"].map((id, index) => ({
+		const transactions = ["1", "2", "3", "4", "5", "6"].map((id, index) => ({
 			id,
 			bookingDate: `2026-08-${String(index + 1).padStart(2, "0")}`,
 			amountMinor: -4000,
@@ -75,10 +86,11 @@ describe("Hr. Körner deterministic review", () => {
 			...transactions[0],
 			id: "new",
 			bookingDate: "2026-09-16",
-			amountMinor: -18900,
+			amountMinor: -28900,
 		};
 		const result = detectFinancialObservations({
 			...base,
+			profile: { ...base.profile, alertSensitivity: "detailed" },
 			transactions: [...transactions, recent],
 		});
 		expect(result[0]).toMatchObject({
@@ -87,9 +99,9 @@ describe("Hr. Körner deterministic review", () => {
 			confidence: "medium",
 		});
 		expect(result[0].evidence).toMatchObject({
-			spentMinor: 18900,
+			spentMinor: 28900,
 			merchantMedianMinor: 4000,
-			priorCount: 3,
+			priorCount: 6,
 		});
 		expect(`${result[0].title} ${result[0].explanation}`).not.toMatch(
 			/betrug|besitzen|fraud/i,
@@ -98,13 +110,17 @@ describe("Hr. Körner deterministic review", () => {
 			detectFinancialObservations({
 				...base,
 				transactions: [...transactions, recent],
-				profile: { ...base.profile, ignoredCategoryIds: ["shoes"] },
+				profile: {
+					...base.profile,
+					alertSensitivity: "detailed",
+					ignoredCategoryIds: ["shoes"],
+				},
 			}),
 		).toEqual([]);
 	});
 
 	it("ignores a purchase threshold entered in the previous base currency", () => {
-		const transactions = ["1", "2", "3"].map((id, index) => ({
+		const transactions = ["1", "2", "3", "4", "5", "6"].map((id, index) => ({
 			id,
 			bookingDate: `2026-08-${String(index + 1).padStart(2, "0")}`,
 			amountMinor: -4000,
@@ -118,7 +134,7 @@ describe("Hr. Körner deterministic review", () => {
 			...transactions[0],
 			id: "new",
 			bookingDate: "2026-09-16",
-			amountMinor: -18900,
+			amountMinor: -28900,
 		};
 		// 500 € was the owner's threshold; the base is now USD. The EUR figure
 		// must not silence a 189 $ outlier as if it were 500 $.
@@ -128,6 +144,7 @@ describe("Hr. Körner deterministic review", () => {
 			profile: {
 				...base.profile,
 				currency: "EUR",
+				alertSensitivity: "detailed",
 				largePurchaseThresholdMinor: 50_000,
 			},
 			transactions: [...transactions, recent],
@@ -145,16 +162,31 @@ describe("Hr. Körner deterministic review", () => {
 			// Outflows are stored negative, exactly as detection writes them.
 			monthlyEquivalentMinor: -1000,
 		}));
-		const result = detectFinancialObservations({ ...base, recurring });
+		for (const alertSensitivity of ["quiet", "balanced"] as const) {
+			expect(
+				detectFinancialObservations({
+					...base,
+					recurring,
+					profile: { ...base.profile, alertSensitivity },
+				}),
+			).toEqual([]);
+		}
+		const result = detectFinancialObservations({
+			...base,
+			recurring,
+			profile: { ...base.profile, alertSensitivity: "detailed" },
+		});
 		expect(result[0]).toMatchObject({
 			type: "repeated_small_leak",
+			severity: "info",
+			actionable: false,
 			impactMinor: 36000,
 		});
 		expect(result[0].evidence).toMatchObject({
 			monthlyMinor: 3000,
 			annualMinor: 36000,
 		});
-		expect(result[0].explanation).toContain("nicht erkennbar");
+		expect(result[0].title).toBe("Abos im Überblick");
 		expect(
 			detectFinancialObservations({
 				...base,
@@ -188,25 +220,34 @@ describe("Hr. Körner deterministic review", () => {
 		).toEqual([]);
 	});
 
-	it("makes stale or missing valuations visible without inventing a current price", () => {
-		const result = detectFinancialObservations({
-			...base,
-			staleValuations: [
-				{ id: "a", kind: "asset", name: "Uhr", ageDays: 45 },
-				{ id: "b", kind: "security", name: "ETF", ageDays: null },
-			],
-		});
-		expect(result).toHaveLength(2);
-		expect(result.every((item) => item.impactMinor === null)).toBe(true);
+	it("does not analyse routine shopping without opt-in or enough history", () => {
+		const transactions = Array.from({ length: 7 }, (_, index) => ({
+			id: String(index),
+			bookingDate: "2026-09-16",
+			amountMinor: index === 6 ? -30_000 : -4000,
+			currency: "EUR",
+			merchantName: "Supermarkt",
+			categoryId: null,
+			transferGroupId: null,
+			status: "booked",
+		}));
+		expect(detectFinancialObservations({ ...base, transactions })).toEqual([]);
 		expect(
 			detectFinancialObservations({
 				...base,
+				transactions: transactions.slice(2),
 				profile: { ...base.profile, alertSensitivity: "detailed" },
-				staleValuations: [
-					{ id: "new", kind: "asset", name: "Uhr", ageDays: 20 },
-				],
 			}),
-		).toHaveLength(1);
+		).toEqual([]);
+		expect(
+			detectFinancialObservations({
+				...base,
+				transactions,
+				profile: { ...base.profile, alertSensitivity: "detailed" },
+			}),
+		).toMatchObject([
+			{ type: "unusual_spend", severity: "info", actionable: false },
+		]);
 	});
 
 	it("estimates goal delay only from a stated positive monthly saving rate", () => {
@@ -302,7 +343,7 @@ describe("price increases", () => {
 		expect(finding.explanation).not.toContain("€");
 	});
 
-	it("treats a large rise as worth a closer look", () => {
+	it("keeps even a large price change an observation", () => {
 		const [finding] = detectFinancialObservations({
 			...base,
 			recurring: [
@@ -314,7 +355,7 @@ describe("price increases", () => {
 				},
 			],
 		}).filter((row) => row.type === "recurring_price_increase");
-		expect(finding.severity).toBe("review");
+		expect(finding.severity).toBe("notable");
 	});
 });
 

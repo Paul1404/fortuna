@@ -590,11 +590,7 @@ export function ConnectionsPanel({
 							</Button>
 						) : null}
 					</div>
-					<p
-						className={
-							scalableStatus.stale ? "text-warning" : "text-text-muted"
-						}
-					>
+					<p className={"text-text-muted"}>
 						Letzter Abgleich:{" "}
 						{hostedStatus.lastSyncAt || scalableStatus.lastSyncAt
 							? f.dateTime(hostedStatus.lastSyncAt ?? scalableStatus.lastSyncAt)
@@ -604,7 +600,7 @@ export function ConnectionsPanel({
 							? f.dateTime(scalableStatus.valuationAt)
 							: "noch nicht vorhanden"}
 						{scalableStatus.stale
-							? " · veraltet oder ohne aktuellen Kurs"
+							? " · letzter verfügbarer Stand"
 							: " · aktuell"}
 					</p>
 					<p className="text-xs text-text-muted">

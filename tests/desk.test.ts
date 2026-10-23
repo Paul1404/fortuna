@@ -4,8 +4,8 @@ import {
 	composeDeskTasks,
 	type DeskInputs,
 	filedSummary,
+	investmentOpportunity,
 	liquidityStructure,
-	MAX_VALUE_TASKS,
 	orderTasks,
 	transferSource,
 } from "@/domain/desk";
@@ -288,7 +288,6 @@ function inputs(overrides: Partial<DeskInputs> = {}): DeskInputs {
 		baseCurrency: "EUR",
 		bookings: { open: 0, withProposal: 0, amountMinor: 0 },
 		observations: [],
-		freeMoney: null,
 		quality: [],
 		...overrides,
 	};
@@ -315,152 +314,116 @@ describe("desk tasks", () => {
 		);
 	});
 
-	it("names free money once, with both amounts, from the minimums up", () => {
+	it("keeps investing available without making it a task", () => {
+		expect(investmentOpportunity(null)).toBeNull();
+		expect(
+			investmentOpportunity({
+				bankMinor: MIN_TRANSFER_MINOR - 1,
+				brokerMinor: MIN_ORDER_MINOR - 1,
+			}),
+		).toBeNull();
+		expect(
+			investmentOpportunity({ bankMinor: 431_300, brokerMinor: 10_700 }),
+		).toEqual({ bankMinor: 431_300, brokerMinor: 10_700 });
+		expect(
+			investmentOpportunity({
+				bankMinor: MIN_TRANSFER_MINOR - 1,
+				brokerMinor: 60_000,
+			}),
+		).toEqual({ bankMinor: 0, brokerMinor: 60_000 });
+		expect(composeDeskTasks(inputs())).toEqual([]);
+	});
+
+	it("never turns old or undated values into chores, even without an active observation", () => {
+		const quality = (
+			["account", "asset", "liability", "receivable", "fxRate"] as const
+		).flatMap((kind) => [
+			{ id: `${kind}-old`, kind, name: kind, state: "stale", ageDays: 365 },
+			...(kind === "fxRate"
+				? []
+				: [
+						{
+							id: `${kind}-missing`,
+							kind,
+							name: kind,
+							state: "missing",
+							ageDays: null,
+						},
+					]),
+		]);
+		expect(composeDeskTasks(inputs({ quality }))).toEqual([]);
+	});
+
+	it("keeps a missing exchange rate actionable because money is excluded from totals", () => {
 		expect(
 			composeDeskTasks(
 				inputs({
-					freeMoney: {
-						bankMinor: MIN_TRANSFER_MINOR - 1,
-						brokerMinor: MIN_ORDER_MINOR - 1,
-					},
+					quality: [
+						{
+							id: "USD",
+							kind: "fxRate",
+							name: "Wechselkurs USD",
+							state: "missing",
+							ageDays: null,
+						},
+					],
 				}),
 			),
-		).toEqual([]);
-		const [task, ...rest] = composeDeskTasks(
-			inputs({ freeMoney: { bankMinor: 431_300, brokerMinor: 10_700 } }),
-		);
-		expect(rest).toEqual([]);
-		expect(task).toMatchObject({
-			key: "invest_money",
-			title: "Freies Geld",
-			amountMinor: 442_000,
-			action: { kind: "invest_money", bankMinor: 431_300, brokerMinor: 10_700 },
-		});
-		expect(task.detail).toBe(
-			`${eur(431_300)} auf dem Konto, ${eur(10_700)} im Depot.`,
-		);
-	});
-
-	it("leaves bank money below a transfer's worth out of the figure", () => {
-		const [task] = composeDeskTasks(
-			inputs({
-				freeMoney: { bankMinor: MIN_TRANSFER_MINOR - 1, brokerMinor: 60_000 },
-			}),
-		);
-		expect(task.detail).toBe(`${eur(60_000)} im Depot.`);
-		expect(task.action).toEqual({
-			kind: "invest_money",
-			bankMinor: 0,
-			brokerMinor: 60_000,
-		});
-	});
-
-	it("names stale values but leaves those an observation already raised", () => {
-		const tasks = composeDeskTasks(
-			inputs({
-				observations: [
-					{
-						id: "obs-1",
-						key: "stale_valuation:asset:car",
-						severity: "notable",
-						title: "Wert prüfen: Auto",
-						explanation: "Die letzte Bewertung ist 90 Tage alt.",
-						impactMinor: null,
-						currency: null,
-					},
-				],
-				quality: [
-					{
-						id: "car",
-						kind: "asset",
-						name: "Auto",
-						state: "stale",
-						ageDays: 90,
-					},
-					{
-						id: "loan",
-						kind: "liability",
-						name: "Kredit",
-						state: "missing",
-						ageDays: null,
-					},
-					{
-						id: "giro",
-						kind: "account",
-						name: "Giro",
-						state: "current",
-						ageDays: 1,
-					},
-				],
-			}),
-		);
-		expect(tasks.map((task) => task.key)).toEqual([
-			"observation:stale_valuation:asset:car",
-			"update_value:liability:loan",
-		]);
-		expect(tasks[1]).toMatchObject({
-			title: "Kredit aktualisieren",
-			detail: "Kein Datum hinterlegt.",
-			action: {
-				kind: "update_value",
-				href: "/debts?tab=liabilities&highlight=loan",
+		).toMatchObject([
+			{
+				severity: "review",
+				title: "Wechselkurs USD fehlt",
+				action: { kind: "open", href: "/settings" },
 			},
-		});
-		// The stale-value observation links straight into the value update.
-		expect(tasks[0].action).toEqual({
-			kind: "observation",
-			observationId: expect.any(String),
-			href: "/assets/car?update=1",
-		});
-	});
-
-	it(`puts at most ${MAX_VALUE_TASKS} stale values on the desk`, () => {
-		const quality = Array.from({ length: 9 }, (_, index) => ({
-			id: `asset-${index}`,
-			kind: "asset" as const,
-			name: `Wert ${index}`,
-			state: "stale",
-			ageDays: 40 + index,
-		}));
-		const tasks = composeDeskTasks(inputs({ quality }));
-		expect(tasks).toHaveLength(MAX_VALUE_TASKS);
-		// Oldest first.
-		expect(tasks[0].key).toBe("update_value:asset:asset-8");
-	});
-
-	it("maps observation severity and counts only base-currency impact", () => {
-		const tasks = composeDeskTasks(
-			inputs({
-				observations: [
-					{
-						id: "a",
-						key: "liquidity:reserve",
-						severity: "urgent",
-						title: "Liquiditätsreserve unterschritten",
-						explanation: "…",
-						impactMinor: 50_000,
-						currency: "EUR",
-					},
-					{
-						id: "b",
-						key: "price_increase:x",
-						severity: "notable",
-						title: "Teurer",
-						explanation: "…",
-						impactMinor: 1_000,
-						currency: "USD",
-					},
-				],
-			}),
-		);
-		expect(tasks.map((task) => [task.severity, task.amountMinor])).toEqual([
-			["urgent", 50_000],
-			["info", null],
 		]);
-		expect(tasks[0].action).toEqual({
-			kind: "observation",
-			observationId: "a",
-		});
+	});
+
+	it("keeps optional, stale and explicitly non-actionable observations off the desk", () => {
+		const observation = {
+			id: "obs",
+			key: "test",
+			severity: "review" as const,
+			title: "Hinweis",
+			explanation: "Kontext",
+			impactMinor: null,
+			currency: null,
+		};
+		const observations = [
+			{ ...observation, type: "lifestyle_creep", actionable: false },
+			{ ...observation, type: "stale_asset_valuation", actionable: true },
+			{ ...observation, type: "recurring_price_increase", actionable: true },
+			{ ...observation, type: "unusual_spend", actionable: true },
+			{ ...observation, type: "liquidity_below_floor", actionable: false },
+		];
+		expect(composeDeskTasks(inputs({ observations }))).toEqual([]);
+	});
+
+	it("keeps real liquidity problems on the desk and only counts base-currency impact", () => {
+		const observation = {
+			id: "a",
+			key: "liquidity:reserve",
+			type: "liquidity_below_floor",
+			actionable: true,
+			severity: "urgent" as const,
+			title: "Reserve unterschritten",
+			explanation: "Kontext",
+			impactMinor: 50_000,
+			currency: "EUR",
+		};
+		expect(
+			composeDeskTasks(inputs({ observations: [observation] })),
+		).toMatchObject([
+			{
+				severity: "urgent",
+				amountMinor: 50_000,
+				action: { kind: "observation", observationId: "a" },
+			},
+		]);
+		expect(
+			composeDeskTasks(
+				inputs({ observations: [{ ...observation, currency: "USD" }] }),
+			)[0].amountMinor,
+		).toBeNull();
 	});
 
 	it("orders by severity, then money at stake, then as composed", () => {
@@ -489,7 +452,6 @@ describe("desk tasks", () => {
 	it("keeps keys stable across identical inputs", () => {
 		const input = inputs({
 			bookings: { open: 2, withProposal: 1, amountMinor: 100 },
-			freeMoney: { bankMinor: 0, brokerMinor: 60_000 },
 		});
 		expect(composeDeskTasks(input).map((task) => task.key)).toEqual(
 			composeDeskTasks(input).map((task) => task.key),

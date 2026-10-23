@@ -7,17 +7,16 @@ import {
 	Landmark,
 	RotateCcw,
 } from "lucide-react";
-import { Suspense, useCallback, useEffect, useRef, useState } from "react";
+import { Suspense, useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 import { CategoryReviewDialog } from "@/components/category-review";
-import { InvestDialog, isTransferDone } from "@/components/investment-advice";
+import { InvestDialog } from "@/components/investment-advice";
 import { ReservePot } from "@/components/reserve-pot";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Card, CardBody, CardHeader } from "@/components/ui/card";
 import { Dialog, DialogContent } from "@/components/ui/dialog";
 import { Menu, MenuContent, MenuItem, MenuTrigger } from "@/components/ui/menu";
-import { MIN_ORDER_MINOR } from "@/domain/capital-advice";
 import type {
 	DeskAction,
 	DeskFiled,
@@ -103,22 +102,7 @@ export function FiledNote() {
 	);
 }
 
-/* ── Heute zu tun ─────────────────────────────────────────────────────────── */
-
-/**
- * "Freies Geld" stays off the desk for a few days once the owner reported the
- * transfer made and nothing is left to buy with the cash already at the
- * broker: the bank needs that long to show it.
- */
-function waitingForTransfer(task: DeskTask): boolean {
-	const action = task.action;
-	return (
-		action.kind === "invest_money" &&
-		action.bankMinor > 0 &&
-		action.brokerMinor < MIN_ORDER_MINOR &&
-		isTransferDone(action.bankMinor)
-	);
-}
+/* Decisions */
 
 const SEVERITY_BADGE = {
 	urgent: { label: "Dringend", variant: "negative" },
@@ -130,10 +114,6 @@ function actionLabel(action: DeskAction): string {
 	switch (action.kind) {
 		case "review_bookings":
 			return "Durchsehen";
-		case "invest_money":
-			return "Anlegen";
-		case "update_value":
-			return "Aktualisieren";
 		case "open":
 			return "Öffnen";
 		case "observation":
@@ -144,27 +124,15 @@ function actionLabel(action: DeskAction): string {
 type Opened = { kind: "review" } | { kind: "invest" };
 
 /**
- * "Heute zu tun" and the liquidity card share one "Anlegen" dialog, so the
- * money named on both is one proposal.
+ * The investment opportunity opens from the liquidity card, outside the
+ * decision list.
  */
 export function DeskSections({ today }: { today: DeskToday }) {
 	const [opened, setOpened] = useState<Opened | null>(null);
-	// Read after mount: the done marks live in this browser's storage only.
-	const [hidden, setHidden] = useState<Set<string>>(new Set());
-	const recheck = useCallback(
-		() =>
-			setHidden(
-				new Set(today.tasks.filter(waitingForTransfer).map((task) => task.key)),
-			),
-		[today.tasks],
-	);
-	useEffect(recheck, [recheck]);
-	const tasks = today.tasks.filter((task) => !hidden.has(task.key));
-	const invest = tasks.some((task) => task.action.kind === "invest_money");
+	const tasks = today.tasks;
 
 	function open(task: DeskTask) {
 		if (task.action.kind === "review_bookings") setOpened({ kind: "review" });
-		else if (task.action.kind === "invest_money") setOpened({ kind: "invest" });
 	}
 
 	return (
@@ -172,7 +140,11 @@ export function DeskSections({ today }: { today: DeskToday }) {
 			<TodayCard tasks={tasks} currency={today.baseCurrency} onOpen={open} />
 			<LiquidityCard
 				today={today}
-				onInvest={invest ? () => setOpened({ kind: "invest" }) : null}
+				onInvest={
+					today.investmentOpportunity
+						? () => setOpened({ kind: "invest" })
+						: null
+				}
 			/>
 			{opened?.kind === "review" ? (
 				<Suspense fallback={<LoadingDialog title="Buchungen zuordnen" />}>
@@ -183,10 +155,7 @@ export function DeskSections({ today }: { today: DeskToday }) {
 				</Suspense>
 			) : null}
 			{opened?.kind === "invest" ? (
-				<InvestDialog
-					onClose={() => setOpened(null)}
-					onTransferDone={recheck}
-				/>
+				<InvestDialog onClose={() => setOpened(null)} />
 			) : null}
 		</>
 	);
@@ -204,16 +173,18 @@ function TodayCard({
 	return (
 		<Card>
 			<CardHeader
-				title="Heute zu tun"
+				title="Braucht Ihre Entscheidung"
 				action={
 					<Link to="/hr-koerner" className="text-xs text-brand hover:underline">
-						Erledigt und entschieden
+						Hinweise und Entscheidungen
 					</Link>
 				}
 			/>
 			{tasks.length === 0 ? (
 				<CardBody>
-					<p className="text-sm text-text-secondary">Heute liegt nichts an.</p>
+					<p className="text-sm text-text-secondary">
+						Aktuell ist nichts zu entscheiden.
+					</p>
 				</CardBody>
 			) : (
 				<ul className="divide-y divide-border border-t border-border">
@@ -289,20 +260,8 @@ function hrefLink(href: string): { to: string; search?: never } {
 function TaskAction({ task, onOpen }: { task: DeskTask; onOpen: () => void }) {
 	const action = task.action;
 	if (action.kind === "observation")
-		return action.href ? (
-			// A stale value: the fix is one tap away, the decision beside it.
-			<div className="flex gap-2 max-sm:[&>*]:flex-1">
-				<Button asChild variant="outline" size="sm">
-					<Link {...hrefLink(action.href)}>
-						Aktualisieren <ArrowRight />
-					</Link>
-				</Button>
-				<ObservationActions id={action.observationId} />
-			</div>
-		) : (
-			<ObservationActions id={action.observationId} />
-		);
-	if (action.kind === "update_value" || action.kind === "open")
+		return <ObservationActions id={action.observationId} />;
+	if (action.kind === "open")
 		return (
 			<Button asChild variant="outline" size="sm">
 				<Link {...hrefLink(action.href)}>
@@ -310,6 +269,7 @@ function TaskAction({ task, onOpen }: { task: DeskTask; onOpen: () => void }) {
 				</Link>
 			</Button>
 		);
+
 	return (
 		<Button
 			variant={task.severity === "info" ? "outline" : "default"}
@@ -425,7 +385,7 @@ function LiquidityCard({
 	onInvest: (() => void) | null;
 }) {
 	const f = useFormat();
-	const { liquidity, lazyCash } = today;
+	const { liquidity } = today;
 	const currency = liquidity.baseCurrency;
 	const [showItems, setShowItems] = useState(false);
 	const positive = TIERS.reduce(
@@ -564,25 +524,19 @@ function LiquidityCard({
 						className="border-t border-border pt-3"
 					/>
 				) : null}
-				{lazyCash && lazyCash.excessMinor > 0 ? (
+				{onInvest && today.investmentOpportunity ? (
 					<div className="flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-border pt-3 text-sm text-text-secondary max-sm:[&>button]:w-full">
 						<Landmark className="size-4 shrink-0 text-brand" />
 						<p className="min-w-0 flex-1 basis-64 break-words">
-							Auf den Konten liegen{" "}
-							<Money amountMinor={lazyCash.excessMinor} currency={currency} />{" "}
-							mehr, als Reserve (
+							Für eine Anlage verfügbar:{" "}
 							<Money
-								amountMinor={lazyCash.reserveMinor}
+								amountMinor={
+									today.investmentOpportunity.bankMinor +
+									today.investmentOpportunity.brokerMinor
+								}
 								currency={currency}
-								weight="normal"
 							/>
-							) und Cash-Anteil (
-							<Money
-								amountMinor={lazyCash.cashTargetMinor}
-								currency={currency}
-								weight="normal"
-							/>
-							) verlangen.
+							.
 						</p>
 						{onInvest ? (
 							<Button size="sm" variant="outline" onClick={onInvest}>
