@@ -1000,3 +1000,8 @@ removal, delete package metadata or hide scanner findings. Keep shell/coreutils,
 CA certificates and required C/C++ libraries. CI verifies the pruned image as its
 non-root user; exercise the real PDF/image tools and startup workflows before
 merging. Rebuild images for package updates, never mutate a running deployment.
+
+After removing CLI tools, inspect their orphaned libraries too. The allowlist
+considers every retained HIGH/CRITICAL package, but keeps it whenever a purge
+would remove software outside that bounded list. Keep Scalable ELF loading,
+PDF conversion and TIFF checks in CI when changing native dependencies.

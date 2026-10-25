@@ -3,6 +3,10 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.65.6 - 2026-10-25
+
+- Verwaiste Bibliotheken der entfernten Download- und Signierwerkzeuge entfallen ebenfalls. PDF-Verarbeitung und das Laden des Scalable-Clients werden im fertigen Abbild geprüft.
+
 ## 0.65.5 - 2026-10-25
 
 - Unbenötigte Systemwerkzeuge werden aus dem Server-Abbild entfernt. PDF-Verarbeitung und der signierte Scalable-Client werden im fertigen Abbild geprüft.

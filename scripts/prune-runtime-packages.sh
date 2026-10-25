@@ -12,7 +12,7 @@ trap 'rm -f "$plan"' EXIT
 # Essential because a general-purpose OS needs them; this app image does not.
 # A simulated purge must remove only this explicit allowlist, never an app
 # dependency, libc, coreutils, the shell, certificates or C++ runtime libraries.
-allowed='apt libapt-pkg7.0 libapt-pkg6.0 curl minisign gnupg gnupg-utils gnupg-l10n gpg gpg-agent gpgconf gpgsm gpgv gpg-wks-client dirmngr perl-base ncurses-bin ncurses-base mount util-linux bsdutils login libudev1 liblastlog2-2 libsmartcols1 libmount1 libblkid1 libuuid1 libxrender1 libx11-6 libx11-data'
+allowed='apt libapt-pkg7.0 libapt-pkg6.0 curl minisign gnupg gnupg-utils gnupg-l10n gpg gpg-agent gpgconf gpgsm gpgv gpg-wks-client dirmngr perl-base ncurses-bin ncurses-base mount util-linux bsdutils login libudev1 liblastlog2-2 libsmartcols1 libmount1 libblkid1 libuuid1 libxrender1 libx11-6 libx11-data pinentry-curses libncursesw6 libcurl4t64 libcurl3t64-gnutls libtiff6 libacl1 libsystemd0 libtinfo6'
 for candidate in $allowed; do
   status=$(dpkg-query -W -f='${db:Status-Status}' "$candidate" 2>/dev/null || true)
   [ "$status" = installed ] || continue
