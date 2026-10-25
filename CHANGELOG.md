@@ -3,6 +3,11 @@
 Alle nennenswerten Änderungen an Fortuna. Neueste zuerst. Die Version hier
 entspricht `package.json` und der Versionsanzeige in der App.
 
+## 0.65.3 - 2026-10-25
+
+- Die eigenständige Gestaltungsvorlage enthält dieselben geprüften
+  Nachrichtengrenzen wie ihre Quelldateien.
+
 ## 0.65.2 - 2026-10-25
 
 - Die Gestaltungsvorlage nimmt Steuernachrichten nur noch vom zugehörigen

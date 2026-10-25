@@ -953,3 +953,11 @@ Fortuna also has an explicit Railway start-command override. Keep it aligned
 with `bun --smol .output/server/index.mjs` in `package.json` and the Dockerfile.
 Railway rejects new legacy Config as Code bindings; preserve the existing
 service settings rather than introducing a `railway.toml` for this override.
+
+## Standalone brand runtime
+
+The vendored designer runtime exists in both `fortuna-brand/source/support.js`
+and a gzip/base64 JavaScript entry in the standalone guidelines manifest.
+Apply security fixes to both copies and verify HTTP and file URL rendering.
+Designer controls require the direct parent and its expected origin; the
+separate page relay still needs opaque-origin support for downloaded bundles.
