@@ -497,7 +497,7 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   deprecated and must not come back). `railway config plan` before any
   `railway config apply`; never apply from an agent session without the
   user reading the plan.
-- Every push to `main` deploys to production with check suites disabled;
+- Every push to `main` waits for successful GitHub workflows before production deployment;
   prove changes locally first. The pre-deploy migrator aborts the release on
   failure.
 - `/api/health` is deployment readiness, not an authenticated workflow test or
@@ -988,5 +988,15 @@ push workflow and do not cancel its main-branch runs. PR branch cleanup never
 justifies bypassing CI. Public repositories also enforce CodeQL results on main.
 Container security builds the production image and scans OS and library packages.
 Retain the complete report. Fixable HIGH/CRITICAL findings block delivery;
-upstream-unfixed findings remain visible and require explicit review. Do not add
+findings without a listed fixed package for the current distribution remain visible and require explicit review. Do not add
 blanket scanner ignores or weaken these gates to make a release pass.
+
+## Runtime package pruning
+
+`scripts/prune-runtime-packages.sh` runs only during image construction, after
+all native packages are installed. Its simulated purge accepts only an explicit
+package allowlist and keeps dpkg dependencies valid. Do not add forced dependency
+removal, delete package metadata or hide scanner findings. Keep shell/coreutils,
+CA certificates and required C/C++ libraries. CI verifies the pruned image as its
+non-root user; exercise the real PDF/image tools and startup workflows before
+merging. Rebuild images for package updates, never mutate a running deployment.
