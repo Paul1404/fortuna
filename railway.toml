@@ -1,0 +1,4 @@
+# Keep the production runtime memory mode in source control.
+# Existing build, migration and readiness settings remain service-owned.
+[deploy]
+startCommand = "bun --smol .output/server/index.mjs"

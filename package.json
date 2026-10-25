@@ -1,6 +1,6 @@
 {
 	"name": "fortuna",
-	"version": "0.65.0",
+	"version": "0.65.1",
 	"private": true,
 	"license": "UNLICENSED",
 	"type": "module",
@@ -12,7 +12,7 @@
 		"db:bootstrap:local": "bun scripts/bootstrap-local.ts",
 		"dev": "vite dev --port 3000",
 		"build": "vite build",
-		"start": "bun .output/server/index.mjs",
+		"start": "bun --smol .output/server/index.mjs",
 		"generate-routes": "tsr generate",
 		"test": "vitest run",
 		"test:integration": "vitest run --config vitest.integration.config.ts",
