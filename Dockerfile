@@ -55,4 +55,4 @@ COPY --chown=bun:bun --from=builder /app/tsconfig.json ./tsconfig.json
 
 USER bun
 EXPOSE 3000
-CMD ["bun", ".output/server/index.mjs"]
+CMD ["bun", "--smol", ".output/server/index.mjs"]

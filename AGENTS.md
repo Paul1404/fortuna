@@ -941,3 +941,10 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   `PLAYWRIGHT_CHROMIUM_EXECUTABLE` at it (e.g. `/opt/pw-browsers/chromium`).
 - A clickable table row uses `TableRow`'s `onActivate`, which adds focus and
   Enter/Space; a destructive action asks with `confirm()` first.
+
+## Runtime memory mode
+
+Production server commands pass `bun --smol` explicitly. Keep this scoped to
+the long-lived server process; do not set global `BUN_OPTIONS` for builds,
+installs or migrations. Preserve readiness and background work when measuring
+memory savings. Removing the runtime flag is the rollback.
