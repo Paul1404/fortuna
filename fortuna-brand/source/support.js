@@ -1404,7 +1404,17 @@
         canvasStyleEl = null;
       }
     }
+    // Only the document's embedding parent may send designer controls.
+    // Cross-origin parents must identify themselves through the referrer;
+    // an absent referrer falls back to same-origin controls only.
+    let designerOrigin = window.location.origin;
+    try {
+      if (doc.referrer) designerOrigin = new URL(doc.referrer).origin;
+    } catch {
+      // Retain the same-origin fallback for malformed referrers.
+    }
     window.addEventListener("message", (e) => {
+      if (e.source !== window.parent || e.origin !== designerOrigin) return;
       const type = e.data && e.data.type;
       if (type === "__dc_theme") {
         const t = e.data.theme;
