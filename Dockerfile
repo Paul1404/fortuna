@@ -42,8 +42,9 @@ RUN set -eu; \
 	chmod 0755 /usr/local/bin/sc; \
 	/usr/local/bin/sc --version; \
 	rm /tmp/sc-SHA256SUMS /tmp/sc-SHA256SUMS.minisig "/tmp/$asset"
+ARG RAILWAY_GIT_COMMIT_SHA=local
 COPY scripts/prune-runtime-packages.sh /prune-runtime-packages.sh
-RUN sh /prune-runtime-packages.sh && rm /prune-runtime-packages.sh
+RUN test -n "$RAILWAY_GIT_COMMIT_SHA" && sh /prune-runtime-packages.sh && rm /prune-runtime-packages.sh
 
 # Copy the pruned filesystem into a fresh layer so removed packages are not
 # carried in hidden base-image layers. Preserve Bun's runtime configuration.
