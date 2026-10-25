@@ -948,3 +948,8 @@ Production server commands pass `bun --smol` explicitly. Keep this scoped to
 the long-lived server process; do not set global `BUN_OPTIONS` for builds,
 installs or migrations. Preserve readiness and background work when measuring
 memory savings. Removing the runtime flag is the rollback.
+
+Fortuna also has an explicit Railway start-command override. Keep it aligned
+with `bun --smol .output/server/index.mjs` in `package.json` and the Dockerfile.
+Railway rejects new legacy Config as Code bindings; preserve the existing
+service settings rather than introducing a `railway.toml` for this override.
