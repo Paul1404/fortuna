@@ -68,7 +68,7 @@
 		"@biomejs/biome": "^2.6.4",
 		"@tanstack/router-cli": "^1.167.46",
 		"@tanstack/router-plugin": "^1.168.48",
-		"@types/node": "^26.6.5",
+		"@types/node": "^26.6.6",
 		"@types/pg": "^8.23.1",
 		"@types/react": "^19.3.0",
 		"@types/react-dom": "^19.3.0",
