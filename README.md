@@ -1,5 +1,7 @@
 # Fortuna
 
+> Production runs on Vertex RKE2 via Fleet, with PostgreSQL on Longhorn and private versioned documents in AWS S3. The source image is published to GHCR after main CI and security scanning. Railway deployment notes below describe the retired hosting setup.
+
 ![CI](https://github.com/Paul1404/fortuna/actions/workflows/ci.yml/badge.svg)
 
 Public source for a private, single-user finance application.
