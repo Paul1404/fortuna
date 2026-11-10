@@ -1,6 +1,6 @@
 # Repository guidance
 
-> Production runs on Vertex RKE2 via Fleet, with PostgreSQL on Longhorn and private versioned documents in AWS S3. The source image is published to GHCR after main CI and security scanning. Railway deployment notes below describe the retired hosting setup.
+> Production runs on Vertex RKE2 via Fleet, with PostgreSQL on Longhorn and private S3-compatible document storage in Garage. The source image is published to GHCR after main CI and security scanning. Railway-specific material is historical.
 
 `AGENTS.md` is the canonical instruction file for Fortuna. Claude Code loads it
 through `CLAUDE.md`. Read it before changing code.
@@ -22,7 +22,7 @@ full preview (see "Orders at Scalable").
 
 Stack in one line: TanStack Start (Vite 8, Nitro) + React 19, oRPC procedures
 validated with Valibot, Drizzle on PostgreSQL, better-auth, Tailwind v4, Bun,
-Biome, Vitest. Deployed on Railway via the Dockerfile.
+Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
 
 ## Layout you actually need
 
@@ -494,14 +494,10 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 
 ## Deployment
 
-- Railway project `fortuna`, service `fortuna-app`, defined in
-  `.railway/railway.ts` (TypeScript IaC; `railway.toml` config-as-code is
-  deprecated and must not come back). `railway config plan` before any
-  `railway config apply`; never apply from an agent session without the
-  user reading the plan.
-- Every push to `main` waits for successful GitHub workflows before production deployment;
-  prove changes locally first. The pre-deploy migrator aborts the release on
-  failure.
+- Production runs on Vertex RKE2 through Fleet. Verified main-branch GHCR
+  images are promoted by digest. The migration init container runs before the
+  app starts; PostgreSQL uses Longhorn and documents use a private Garage bucket.
+- Railway IaC under `.railway/` is historical. Do not operate it as production.
 - `/api/health` is deployment readiness, not an authenticated workflow test or
   continuous monitoring. It checks the table/column contract derived from both
   Drizzle schemas without reading owner records. Configured object storage must
@@ -513,7 +509,7 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   `no-store`. Never call bank, broker or model services from a health probe.
   CI exercises the built server and all authenticated routes against disposable
   PostgreSQL; those browser checks complement readiness, not replace it.
-- Secrets are `preserve()`d in IaC and live only in Railway.
+- Runtime secrets are provisioned separately from Git; never print them.
 - User-uploaded provider application keys live in `provider_credentials`, are
   validated server-side, encrypted through `src/server/crypto.ts`, and are
   never returned, logged or exposed through MCP. Keep uploads on a bounded,
@@ -951,10 +947,8 @@ the long-lived server process; do not set global `BUN_OPTIONS` for builds,
 installs or migrations. Preserve readiness and background work when measuring
 memory savings. Removing the runtime flag is the rollback.
 
-Fortuna also has an explicit Railway start-command override. Keep it aligned
-with `bun --smol .output/server/index.mjs` in `package.json` and the Dockerfile.
-Railway rejects new legacy Config as Code bindings; preserve the existing
-service settings rather than introducing a `railway.toml` for this override.
+The old Railway start-command override is historical; keep the production
+Dockerfile and package start command aligned.
 
 ## Standalone brand runtime
 
@@ -966,7 +960,7 @@ separate page relay still needs opaque-origin support for downloaded bundles.
 
 ## Main-only branch lifecycle and security reporting
 
-`main` is the only retained local and remote branch for this active Railway
+`main` is the only retained local and remote branch for this active
 repository. Temporary PR branches are allowed only while work is in progress.
 Keep required checks and branch protections; never bypass them to avoid a branch.
 Before finishing, merge validated work, delete the remote and local task branches,
@@ -985,7 +979,7 @@ credentials, production records and personal data from public issues and commits
 
 ## Production security gates
 
-Railway waits for successful GitHub workflows on `main`. Keep an always-running
+Verified images are published only after successful GitHub workflows on `main`. Keep an always-running
 push workflow and do not cancel its main-branch runs. PR branch cleanup never
 justifies bypassing CI. Public repositories also enforce CodeQL results on main.
 Container security builds the production image and scans OS and library packages.
