@@ -2,7 +2,6 @@ import { and, eq, inArray } from "drizzle-orm";
 import { todayIso } from "@/domain/dates";
 import { computeMarketPulse } from "@/domain/scalable-market-pulse";
 import { decryptSecret, encryptSecret } from "@/server/crypto";
-import { dataRevision } from "@/server/data-revision";
 import { db } from "@/server/db";
 import {
 	externalConnections,
@@ -14,10 +13,10 @@ import {
 	parseScalableHoldingsPulse,
 	ScalableSnapshotError,
 } from "@/server/providers/investment/scalable-cli";
+import type { DevicePrompt } from "@/server/providers/investment/scalable-hosted-cli";
 import {
 	beginScalableDeviceLogin,
 	cancelScalableDeviceLogin,
-	pendingScalableLogin,
 	readScalableBrokerSnapshot,
 	readScalableHoldingsPulse,
 	revokeScalableCliSession,
@@ -30,8 +29,25 @@ import {
 	ingestScalableCliSnapshot,
 	SCALABLE_INGEST_FAILED,
 	ScalableIngestError,
+	StaleScalableReadError,
 } from "./investment-sources";
 import { currentNetWorth } from "./net-worth";
+import {
+	cancelScalableDeviceLoginInDb,
+	claimScalableDeviceLogin,
+	completeScalableDeviceLogin,
+	failScalableDeviceLogin,
+	getScalableDeviceLoginStatus,
+	persistScalableDevicePrompt,
+	scalableDeviceLoginIsCurrent,
+	scalableLoginSlot,
+	waitForScalableDevicePrompt,
+} from "./scalable-device-login";
+import {
+	claimScalableReadOperation,
+	ScalableReadLockLostError,
+	withScalableReadSessionLock,
+} from "./scalable-read-lock";
 import { getSettings, loadFxTable } from "./settings";
 
 const PROVIDER = "scalable_hosted_cli";
@@ -64,10 +80,6 @@ type MarketPulseResult = {
 		positions: Array<{ isin: string; deltaMinor: number; currency: string }>;
 	} | null;
 };
-const pulseCache = new Map<
-	string,
-	{ expiresAt: number; revision: number; result: MarketPulseResult }
->();
 const runningPulses = new Map<string, Promise<MarketPulseResult>>();
 const pulseFailures = new Map<string, number>();
 
@@ -90,162 +102,161 @@ export async function scalableMarketPulse(
 	userId: string,
 ): Promise<MarketPulseResult> {
 	if (runningSyncs.has(userId)) return unavailablePulse("unavailable");
-	const cached = pulseCache.get(userId);
-	if (
-		cached &&
-		cached.expiresAt > Date.now() &&
-		cached.revision === dataRevision(userId)
-	)
-		return cached.result;
 	const running = runningPulses.get(userId);
 	if (running) return running;
-	const run = (async (): Promise<MarketPulseResult> => {
-		const row = await connection(userId);
-		if (!row?.encryptedSecret || row.status !== "active")
-			return unavailablePulse("unavailable");
-		if (runningSyncs.has(userId)) return unavailablePulse("unavailable");
-		if ((pulseFailures.get(userId) ?? 0) > Date.now() - 5 * 60_000)
-			return unavailablePulse("error");
-		try {
-			const account = await db.query.investmentSourceAccounts.findFirst({
-				where: and(
-					eq(investmentSourceAccounts.userId, userId),
-					eq(investmentSourceAccounts.provider, "scalable"),
-					eq(investmentSourceAccounts.method, "cli"),
-					eq(investmentSourceAccounts.status, "active"),
-				),
-			});
+	const run = withScalableReadSessionLock(
+		userId,
+		async (lock): Promise<MarketPulseResult> => {
+			const claim = await claimScalableReadOperation(userId, lock);
+			if (!claim) return unavailablePulse("unavailable");
+			const row = await connection(userId);
 			if (
-				!account ||
-				account.portfolioValueMinor === null ||
-				account.sourceAccountId.length < 8
+				!row?.encryptedSecret ||
+				row.status !== "active" ||
+				row.id !== claim.connectionId ||
+				row.scalableReadGeneration !== claim.generation ||
+				row.encryptedSecret !== claim.encryptedSecret
 			)
 				return unavailablePulse("unavailable");
-			const raw = await readScalableHoldingsPulse(
-				parseSecret(row.encryptedSecret),
-				async (updated) => {
-					const saved = await db
-						.update(externalConnections)
-						.set({
-							encryptedSecret: encryptSecret(
-								JSON.stringify({
-									kind: "cli_session",
-									version: 1,
-									...updated,
-								} satisfies HostedSecret),
-							),
+			if (runningSyncs.has(userId)) return unavailablePulse("unavailable");
+			if ((pulseFailures.get(userId) ?? 0) > Date.now() - 5 * 60_000)
+				return unavailablePulse("error");
+			try {
+				const account = await db.query.investmentSourceAccounts.findFirst({
+					where: and(
+						eq(investmentSourceAccounts.userId, userId),
+						eq(investmentSourceAccounts.provider, "scalable"),
+						eq(investmentSourceAccounts.method, "cli"),
+						eq(investmentSourceAccounts.status, "active"),
+					),
+				});
+				if (
+					!account ||
+					account.portfolioValueMinor === null ||
+					account.sourceAccountId.length < 8
+				)
+					return unavailablePulse("unavailable");
+				await lock.assertHeld();
+				const raw = await readScalableHoldingsPulse(
+					parseSecret(row.encryptedSecret),
+					saveScalableReadSessionRotation(
+						row.id,
+						row.encryptedSecret,
+						claim.generation,
+					),
+				);
+				await lock.assertHeld();
+				const pulse = parseScalableHoldingsPulse(raw);
+				if (account.sourceAccountId !== `broker:${pulse.portfolioId}`)
+					throw new Error("Scalable pulse portfolio mismatch");
+				if (account.encryptedRawMetadata) {
+					const identity = JSON.parse(
+						decryptSecret(account.encryptedRawMetadata),
+					) as { accountId?: unknown };
+					if (identity.accountId !== pulse.accountId)
+						throw new Error("Scalable pulse account mismatch");
+				}
+				const currentConnection = await connection(userId);
+				if (
+					currentConnection?.status !== "active" ||
+					currentConnection.scalableReadGeneration !== claim.generation
+				)
+					return unavailablePulse("unavailable");
+				const [baseline, worth, settings, fx] = await Promise.all([
+					db
+						.select({
+							isin: investmentSourcePositions.isin,
+							quantity: investmentSourcePositions.quantity,
+							currency: investmentSourcePositions.currency,
+							valueMinor: investmentSourcePositions.valueMinor,
+							valuationAt: investmentSourcePositions.valuationAt,
+							valuationSource: investmentSourcePositions.valuationSource,
 						})
+						.from(investmentSourcePositions)
 						.where(
 							and(
-								eq(externalConnections.id, row.id),
-								eq(externalConnections.status, "active"),
+								eq(investmentSourcePositions.userId, userId),
+								eq(investmentSourcePositions.accountId, account.id),
 							),
-						)
-						.returning({ id: externalConnections.id });
-					if (!saved.length) throw new Error("Scalable session disconnected");
-				},
-			);
-			const pulse = parseScalableHoldingsPulse(raw);
-			if (account.sourceAccountId !== `broker:${pulse.portfolioId}`)
-				throw new Error("Scalable pulse portfolio mismatch");
-			if (account.encryptedRawMetadata) {
-				const identity = JSON.parse(
-					decryptSecret(account.encryptedRawMetadata),
-				) as { accountId?: unknown };
-				if (identity.accountId !== pulse.accountId)
-					throw new Error("Scalable pulse account mismatch");
-			}
-			const currentConnection = await connection(userId);
-			if (currentConnection?.status !== "active")
-				return unavailablePulse("unavailable");
-			const [baseline, worth, settings, fx] = await Promise.all([
-				db
-					.select({
-						isin: investmentSourcePositions.isin,
-						quantity: investmentSourcePositions.quantity,
-						currency: investmentSourcePositions.currency,
-						valueMinor: investmentSourcePositions.valueMinor,
-						valuationAt: investmentSourcePositions.valuationAt,
-						valuationSource: investmentSourcePositions.valuationSource,
-					})
-					.from(investmentSourcePositions)
-					.where(
-						and(
-							eq(investmentSourcePositions.userId, userId),
-							eq(investmentSourcePositions.accountId, account.id),
 						),
-					),
-				currentNetWorth(userId),
-				getSettings(userId),
-				loadFxTable(),
-			]);
-			const comparison = computeMarketPulse(
-				baseline,
-				pulse.positions,
-				new Date(),
-			);
-			let deltaMinor = 0;
-			let skipped = comparison.skipped;
-			for (const mover of comparison.movers) {
-				const converted = fx.convert(
-					mover.deltaMinor,
-					mover.currency,
-					settings.baseCurrency,
-					todayIso(),
+					currentNetWorth(userId),
+					getSettings(userId),
+					loadFxTable(),
+				]);
+				const comparison = computeMarketPulse(
+					baseline,
+					pulse.positions,
+					new Date(),
 				);
-				if (converted.missing) {
-					skipped++;
-					continue;
+				let deltaMinor = 0;
+				let skipped = comparison.skipped;
+				for (const mover of comparison.movers) {
+					const converted = fx.convert(
+						mover.deltaMinor,
+						mover.currency,
+						settings.baseCurrency,
+						todayIso(),
+					);
+					if (converted.missing) {
+						skipped++;
+						continue;
+					}
+					deltaMinor += converted.amountMinor;
 				}
-				deltaMinor += converted.amountMinor;
+				const indicative = worth.netWorthMinor + deltaMinor;
+				const lastProviderQuoteAt = pulse.positions.reduce<Date | null>(
+					(latest, holding) =>
+						holding.quoteAt && (!latest || holding.quoteAt > latest)
+							? holding.quoteAt
+							: latest,
+					null,
+				);
+				const result: MarketPulseResult = {
+					status: comparison.latestQuoteAt ? "available" : "stale",
+					confirmedNetWorthMinor: worth.netWorthMinor,
+					indicativeNetWorthMinor: comparison.latestQuoteAt ? indicative : null,
+					deltaMinor,
+					currency: settings.baseCurrency,
+					quotedAt: comparison.latestQuoteAt ?? lastProviderQuoteAt,
+					checkedAt: new Date(),
+					skipped,
+					depot: comparison.latestQuoteAt
+						? {
+								accountId: account.id,
+								positions: comparison.movers.map((mover) => ({
+									isin: mover.isin,
+									deltaMinor: mover.deltaMinor,
+									currency: mover.currency,
+								})),
+							}
+						: null,
+				};
+				await lock.assertHeld();
+				const latestConnection = await connection(userId);
+				if (
+					latestConnection?.status !== "active" ||
+					latestConnection.scalableReadGeneration !== claim.generation
+				)
+					return unavailablePulse("unavailable");
+				pulseFailures.delete(userId);
+				return result;
+			} catch (error) {
+				if (
+					error instanceof ScalableReadLockLostError ||
+					error instanceof StaleScalableReadError
+				)
+					return unavailablePulse("unavailable");
+				pulseFailures.set(userId, Date.now());
+				const failure = classifyScalableSyncFailure(error);
+				logger.warn("Scalable market pulse failed", {
+					event: "scalable.hosted.pulse.failed",
+					errorCode: failure.errorCode,
+					detail: failure.detail,
+				});
+				return unavailablePulse("error");
 			}
-			const indicative = worth.netWorthMinor + deltaMinor;
-			const lastProviderQuoteAt = pulse.positions.reduce<Date | null>(
-				(latest, holding) =>
-					holding.quoteAt && (!latest || holding.quoteAt > latest)
-						? holding.quoteAt
-						: latest,
-				null,
-			);
-			const result: MarketPulseResult = {
-				status: comparison.latestQuoteAt ? "available" : "stale",
-				confirmedNetWorthMinor: worth.netWorthMinor,
-				indicativeNetWorthMinor: comparison.latestQuoteAt ? indicative : null,
-				deltaMinor,
-				currency: settings.baseCurrency,
-				quotedAt: comparison.latestQuoteAt ?? lastProviderQuoteAt,
-				checkedAt: new Date(),
-				skipped,
-				depot: comparison.latestQuoteAt
-					? {
-							accountId: account.id,
-							positions: comparison.movers.map((mover) => ({
-								isin: mover.isin,
-								deltaMinor: mover.deltaMinor,
-								currency: mover.currency,
-							})),
-						}
-					: null,
-			};
-			pulseCache.set(userId, {
-				result,
-				// One read per ticker interval (15 s); every subscriber shares it.
-				expiresAt: Date.now() + 14_000,
-				revision: dataRevision(userId),
-			});
-			pulseFailures.delete(userId);
-			return result;
-		} catch (error) {
-			pulseFailures.set(userId, Date.now());
-			const failure = classifyScalableSyncFailure(error);
-			logger.warn("Scalable market pulse failed", {
-				event: "scalable.hosted.pulse.failed",
-				errorCode: failure.errorCode,
-				detail: failure.detail,
-			});
-			return unavailablePulse("error");
-		}
-	})();
+		},
+	);
 	runningPulses.set(userId, run);
 	try {
 		return await run;
@@ -267,6 +278,38 @@ function parseSecret(encrypted: string): HostedSecret {
 	return parsed;
 }
 
+export function saveScalableReadSessionRotation(
+	connectionId: string,
+	initialEncryptedSecret: string,
+	generation: number,
+): (updated: ScalableCliAuthFiles) => Promise<void> {
+	let expectedEncryptedSecret = initialEncryptedSecret;
+	return async (updated) => {
+		const nextEncryptedSecret = encryptSecret(
+			JSON.stringify({
+				kind: "cli_session",
+				version: 1,
+				...updated,
+			} satisfies HostedSecret),
+		);
+		const saved = await db
+			.update(externalConnections)
+			.set({ encryptedSecret: nextEncryptedSecret })
+			.where(
+				and(
+					eq(externalConnections.id, connectionId),
+					eq(externalConnections.scalableReadGeneration, generation),
+					eq(externalConnections.encryptedSecret, expectedEncryptedSecret),
+					inArray(externalConnections.status, ["active", "error"]),
+				),
+			)
+			.returning({ id: externalConnections.id });
+		if (!saved.length)
+			throw new Error("Scalable session rotated on another replica");
+		expectedEncryptedSecret = nextEncryptedSecret;
+	};
+}
+
 async function connection(userId: string) {
 	return db.query.externalConnections.findFirst({
 		where: and(
@@ -277,11 +320,14 @@ async function connection(userId: string) {
 }
 
 export async function scalableHostedStatus(userId: string) {
-	const row = await connection(userId);
+	const [row, login] = await Promise.all([
+		connection(userId),
+		getScalableDeviceLoginStatus(userId, PROVIDER),
+	]);
 	return {
 		configured: Boolean(row?.encryptedSecret && row.status !== "disconnected"),
-		status: row?.status ?? "disconnected",
-		pending: Boolean(pendingScalableLogin(userId)),
+		status: login.pending ? "pending" : (row?.status ?? "disconnected"),
+		pending: login.pending,
 		syncing: runningSyncs.has(userId),
 		lastSyncAt: row?.lastSyncAt ?? null,
 		lastAttemptedSyncAt: row?.lastAttemptedSyncAt ?? null,
@@ -290,83 +336,72 @@ export async function scalableHostedStatus(userId: string) {
 }
 
 export async function beginScalableHostedConnection(userId: string) {
-	const existing = pendingScalableLogin(userId);
-	if (existing) return existing;
-	await db
-		.insert(externalConnections)
-		.values({ userId, provider: PROVIDER, status: "pending", lastError: null })
-		.onConflictDoUpdate({
-			target: [externalConnections.userId, externalConnections.provider],
-			set: { status: "pending", lastError: null, updatedAt: new Date() },
-		});
+	const result = await claimScalableDeviceLogin(userId, PROVIDER);
+	if (result.kind === "existing_prompt") return result.prompt;
+	if (result.kind === "starting")
+		return waitForScalableDevicePrompt(userId, PROVIDER, result.generation);
+	const { claim } = result;
+	const coordination = {
+		workerId: claim.workerId,
+		generation: claim.generation,
+		onPrompt: (prompt: DevicePrompt) =>
+			persistScalableDevicePrompt(claim, prompt),
+		isCurrent: () => scalableDeviceLoginIsCurrent(claim),
+	};
 	try {
 		return await beginScalableDeviceLogin(
-			userId,
+			scalableLoginSlot(userId, PROVIDER),
 			async (auth) => {
-				const saved = await db
-					.update(externalConnections)
-					.set({
-						status: "active",
-						lastError: null,
-						encryptedSecret: encryptSecret(
-							JSON.stringify({
-								kind: "cli_session",
-								version: 1,
-								...auth,
-							} satisfies HostedSecret),
-						),
-						updatedAt: new Date(),
-					})
-					.where(
-						and(
-							eq(externalConnections.userId, userId),
-							eq(externalConnections.provider, PROVIDER),
-							eq(externalConnections.status, "pending"),
-						),
-					)
-					.returning({ id: externalConnections.id });
-				if (!saved.length) {
-					await revokeScalableCliSession(auth).catch(() => undefined);
-					return;
-				}
+				const saved = await completeScalableDeviceLogin(claim, async (tx) => {
+					const rows = await tx
+						.update(externalConnections)
+						.set({
+							status: "active",
+							lastError: null,
+							encryptedSecret: encryptSecret(
+								JSON.stringify({
+									kind: "cli_session",
+									version: 1,
+									...auth,
+								} satisfies HostedSecret),
+							),
+							updatedAt: new Date(),
+						})
+						.where(
+							and(
+								eq(externalConnections.userId, userId),
+								eq(externalConnections.provider, PROVIDER),
+							),
+						)
+						.returning({ id: externalConnections.id });
+					if (!rows.length)
+						throw new Error("Scalable read connection is missing");
+				});
+				if (!saved) return false;
 				logger.info("Scalable device login completed", {
 					event: "scalable.hosted.login.completed",
 				});
 				void syncScalableHostedConnection(userId).catch(() => undefined);
+				return true;
 			},
 			async () => {
-				await db
-					.update(externalConnections)
-					.set({
-						status: "error",
-						lastError: "Scalable-Anmeldung fehlgeschlagen oder abgelaufen",
-						updatedAt: new Date(),
-					})
-					.where(
-						and(
-							eq(externalConnections.userId, userId),
-							eq(externalConnections.provider, PROVIDER),
-							eq(externalConnections.status, "pending"),
-						),
-					);
+				await failScalableDeviceLogin(
+					claim,
+					"LOGIN_FAILED",
+					"Scalable-Anmeldung fehlgeschlagen oder abgelaufen",
+				);
 				logger.warn("Scalable device login failed", {
 					event: "scalable.hosted.login.failed",
 				});
 			},
+			{ coordination },
 		);
 	} catch {
-		await db
-			.update(externalConnections)
-			.set({
-				status: "error",
-				lastError: "Scalable-Anmeldung konnte nicht gestartet werden",
-			})
-			.where(
-				and(
-					eq(externalConnections.userId, userId),
-					eq(externalConnections.provider, PROVIDER),
-				),
-			);
+		await failScalableDeviceLogin(
+			claim,
+			"LOGIN_START_FAILED",
+			"Scalable-Anmeldung konnte nicht gestartet werden",
+		).catch(() => undefined);
 		throw new Error("Scalable-Anmeldung konnte nicht gestartet werden");
 	}
 }
@@ -452,59 +487,65 @@ export function classifyScalableSyncFailure(
 export async function syncScalableHostedConnection(userId: string) {
 	const existing = runningSyncs.get(userId);
 	if (existing) return existing;
-	const run = (async () => {
-		// CLI refresh tokens must not be rotated by two concurrent workspaces.
-		const pulse = runningPulses.get(userId);
-		if (pulse) await pulse;
+	const run = withScalableReadSessionLock(userId, async (lock) => {
+		const claim = await claimScalableReadOperation(userId, lock);
+		if (!claim) throw new Error("Scalable ist nicht verbunden");
 		const row = await connection(userId);
-		if (!row?.encryptedSecret || row.status === "disconnected")
-			throw new Error("Scalable ist nicht verbunden");
-		const secret = parseSecret(row.encryptedSecret);
-		await db
-			.update(externalConnections)
-			.set({ lastAttemptedSyncAt: new Date(), lastError: null })
-			.where(eq(externalConnections.id, row.id));
+		if (
+			!row?.encryptedSecret ||
+			(row.status !== "active" && row.status !== "error") ||
+			row.id !== claim.connectionId ||
+			row.scalableReadGeneration !== claim.generation ||
+			row.encryptedSecret !== claim.encryptedSecret
+		)
+			throw new StaleScalableReadError();
+		const secret = parseSecret(claim.encryptedSecret);
 		try {
+			await lock.assertHeld();
+			const attempted = await db
+				.update(externalConnections)
+				.set({ lastAttemptedSyncAt: new Date(), lastError: null })
+				.where(
+					and(
+						eq(externalConnections.id, row.id),
+						eq(externalConnections.scalableReadGeneration, claim.generation),
+						inArray(externalConnections.status, ["active", "error"]),
+					),
+				)
+				.returning({ id: externalConnections.id });
+			if (!attempted.length) throw new StaleScalableReadError();
 			const bundle = await readScalableBrokerSnapshot(
 				secret as ScalableCliAuthFiles,
-				async (updated) => {
-					const saved = await db
-						.update(externalConnections)
-						.set({
-							encryptedSecret: encryptSecret(
-								JSON.stringify({
-									kind: "cli_session",
-									version: 1,
-									...updated,
-								} satisfies HostedSecret),
-							),
-						})
-						.where(
-							and(
-								eq(externalConnections.id, row.id),
-								inArray(externalConnections.status, ["active", "error"]),
-							),
-						)
-						.returning({ id: externalConnections.id });
-					if (!saved.length)
-						throw new Error("Scalable-Verbindung wurde getrennt");
-				},
+				saveScalableReadSessionRotation(
+					row.id,
+					claim.encryptedSecret,
+					claim.generation,
+				),
 			);
+			await lock.assertHeld();
 			const current = await connection(userId);
-			if (current?.status !== "active" && current?.status !== "error")
-				throw new Error("Scalable-Verbindung wurde getrennt");
-			const result = await ingestScalableCliSnapshot(userId, bundle);
-			pulseCache.delete(userId);
+			if (
+				(current?.status !== "active" && current?.status !== "error") ||
+				current.scalableReadGeneration !== claim.generation
+			)
+				throw new StaleScalableReadError();
+			const result = await ingestScalableCliSnapshot(userId, bundle, {
+				connectionId: row.id,
+				generation: claim.generation,
+			});
 			const warning = result.warning;
-			await db
+			const completed = await db
 				.update(externalConnections)
 				.set({ status: "active", lastSyncAt: new Date(), lastError: warning })
 				.where(
 					and(
 						eq(externalConnections.id, row.id),
+						eq(externalConnections.scalableReadGeneration, claim.generation),
 						inArray(externalConnections.status, ["active", "error"]),
 					),
-				);
+				)
+				.returning({ id: externalConnections.id });
+			if (!completed.length) throw new StaleScalableReadError();
 			logger.info("Scalable hosted sync completed", {
 				event: "scalable.hosted.sync.completed",
 				positions: result.positions,
@@ -514,6 +555,12 @@ export async function syncScalableHostedConnection(userId: string) {
 			});
 			return result;
 		} catch (error) {
+			if (
+				error instanceof StaleScalableReadError ||
+				error instanceof ScalableReadLockLostError
+			) {
+				throw new Error("Scalable-Abgleich fehlgeschlagen");
+			}
 			const failure = classifyScalableSyncFailure(error);
 			await db
 				.update(externalConnections)
@@ -521,6 +568,7 @@ export async function syncScalableHostedConnection(userId: string) {
 				.where(
 					and(
 						eq(externalConnections.id, row.id),
+						eq(externalConnections.scalableReadGeneration, claim.generation),
 						inArray(externalConnections.status, ["active", "error"]),
 					),
 				);
@@ -531,7 +579,7 @@ export async function syncScalableHostedConnection(userId: string) {
 			});
 			throw new Error("Scalable-Abgleich fehlgeschlagen");
 		}
-	})();
+	});
 	runningSyncs.set(userId, run);
 	try {
 		return await run;
@@ -576,28 +624,24 @@ export async function syncScalableHostedDue(userId: string) {
 }
 
 export async function disconnectScalableHosted(userId: string) {
-	pulseCache.delete(userId);
 	pulseFailures.delete(userId);
-	cancelScalableDeviceLogin(userId);
-	const row = await connection(userId);
-	if (row?.encryptedSecret) {
+	const encryptedSecret = await withScalableReadSessionLock(
+		userId,
+		async () => {
+			const secret = await cancelScalableDeviceLoginInDb(userId, PROVIDER);
+			cancelScalableDeviceLogin(scalableLoginSlot(userId, PROVIDER));
+			return secret;
+		},
+	);
+	if (encryptedSecret) {
 		try {
-			await revokeScalableCliSession(parseSecret(row.encryptedSecret));
+			await revokeScalableCliSession(parseSecret(encryptedSecret));
 		} catch {
 			logger.warn("Scalable provider logout could not be confirmed", {
 				event: "scalable.hosted.logout.unknown",
 			});
 		}
 	}
-	await db
-		.update(externalConnections)
-		.set({ status: "disconnected", encryptedSecret: null, lastError: null })
-		.where(
-			and(
-				eq(externalConnections.userId, userId),
-				eq(externalConnections.provider, PROVIDER),
-			),
-		);
 	await disconnectInvestmentSource(userId);
 	logger.info("Scalable hosted session removed", {
 		event: "scalable.hosted.disconnected",

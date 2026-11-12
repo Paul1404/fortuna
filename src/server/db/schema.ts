@@ -2,6 +2,7 @@ import { relations, sql } from "drizzle-orm";
 import {
 	bigint,
 	boolean,
+	check,
 	date,
 	index,
 	integer,
@@ -274,6 +275,12 @@ export const bankConnections = pgTable(
 		consentExpiresAt: timestamp("consent_expires_at", { withTimezone: true }),
 		lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
 		automaticRetryAt: timestamp("automatic_retry_at", { withTimezone: true }),
+		presenceHeadersRateLimited: boolean("presence_headers_rate_limited")
+			.default(false)
+			.notNull(),
+		syncEpoch: bigint("sync_epoch", { mode: "bigint" })
+			.default(sql`0`)
+			.notNull(),
 		lastError: text("last_error"),
 		...timestamps,
 	},
@@ -313,19 +320,77 @@ export const externalConnections = pgTable(
 		providerConnectionId: text("provider_connection_id"),
 		clientId: text("client_id"),
 		status: connectionStatusEnum("status").default("pending").notNull(),
+		// Copilot increments this on logout and explicit login. Cached App Server
+		// children and credential refreshes must match the current generation.
+		copilotAuthGeneration: bigint("copilot_auth_generation", {
+			mode: "bigint",
+		})
+			.default(sql`0`)
+			.notNull(),
 		// OAuth access and refresh tokens plus temporary PKCE state.
 		encryptedSecret: text("encrypted_secret"),
+		// Copilot uses this on its provider row as a heartbeat lease for a pending
+		// device-code login; other providers use it as an attempt timestamp.
 		lastAttemptedSyncAt: timestamp("last_attempted_sync_at", {
 			withTimezone: true,
 		}),
 		lastSyncAt: timestamp("last_sync_at", { withTimezone: true }),
 		lastError: text("last_error"),
+		scalableReadGeneration: integer("scalable_read_generation")
+			.default(0)
+			.notNull(),
 		...timestamps,
 	},
 	(t) => [
 		uniqueIndex("external_connections_user_provider_unique").on(
 			t.userId,
 			t.provider,
+		),
+	],
+);
+
+/** Cross-replica state for Scalable device-code login workers and prompts. */
+export const scalableDeviceLogins = pgTable(
+	"scalable_device_logins",
+	{
+		id: id(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		provider: text("provider")
+			.$type<"scalable_hosted_cli" | "scalable_trading_cli">()
+			.notNull(),
+		generation: integer("generation").notNull(),
+		status: text("status")
+			.$type<
+				| "starting"
+				| "pending"
+				| "completed"
+				| "failed"
+				| "cancelled"
+				| "expired"
+			>()
+			.notNull(),
+		workerId: text("worker_id"),
+		leaseExpiresAt: timestamp("lease_expires_at", { withTimezone: true }),
+		encryptedPrompt: text("encrypted_prompt"),
+		promptExpiresAt: timestamp("prompt_expires_at", { withTimezone: true }),
+		errorCode: text("error_code"),
+		...timestamps,
+	},
+	(table) => [
+		uniqueIndex("scalable_device_logins_user_provider_unique").on(
+			table.userId,
+			table.provider,
+		),
+		index("scalable_device_logins_lease_idx").on(table.leaseExpiresAt),
+		check(
+			"scalable_device_logins_provider_check",
+			sql`${table.provider} in ('scalable_hosted_cli', 'scalable_trading_cli')`,
+		),
+		check(
+			"scalable_device_logins_status_check",
+			sql`${table.status} in ('starting', 'pending', 'completed', 'failed', 'cancelled', 'expired')`,
 		),
 	],
 );
@@ -466,6 +531,22 @@ export const copilotThreads = pgTable("copilot_threads", {
 	toolsetVersion: integer("toolset_version").default(1).notNull(),
 	...timestamps,
 });
+
+export const categorisationConsultSessions = pgTable(
+	"categorisation_consult_sessions",
+	{
+		id: text("id").primaryKey(),
+		userId: text("user_id")
+			.notNull()
+			.references(() => user.id, { onDelete: "cascade" }),
+		threadId: text("thread_id").notNull(),
+		encryptedHistory: text("encrypted_history").notNull(),
+		expiresAt: timestamp("expires_at", { withTimezone: true }).notNull(),
+	},
+	(table) => [
+		index("categorisation_consult_sessions_expiry_idx").on(table.expiresAt),
+	],
+);
 
 // Explicit owner preferences, separate from free-form Copilot memories.
 export const financialProfiles = pgTable("financial_profiles", {
@@ -1300,8 +1381,17 @@ export const brokerOrders = pgTable(
 		amountMinor: money("amount_minor"),
 		shares: numeric("shares", { precision: 20, scale: 8, mode: "number" }),
 		currency: text("currency").notNull(),
+		/** owner_asserted_* are the owner's records, never broker-confirmed results. */
 		status: text("status")
-			.$type<"previewed" | "submitting" | "submitted" | "failed" | "expired">()
+			.$type<
+				| "previewed"
+				| "submitting"
+				| "submitted"
+				| "failed"
+				| "expired"
+				| "owner_asserted_submitted"
+				| "owner_asserted_not_submitted"
+			>()
 			.notNull(),
 		requiresAcknowledgement: boolean("requires_acknowledgement")
 			.default(false)

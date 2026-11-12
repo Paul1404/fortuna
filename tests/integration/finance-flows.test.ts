@@ -1,24 +1,27 @@
 import { generateKeyPairSync, randomUUID } from "node:crypto";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { eq } from "drizzle-orm";
+import { eq, sql } from "drizzle-orm";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import { addDays, addMonths, todayIso } from "@/domain/dates";
 import { encryptSecret } from "@/server/crypto";
-import { db, pool } from "@/server/db";
+import { bankSyncLockPool, db, pool } from "@/server/db";
 import { user } from "@/server/db/auth-schema";
 import {
 	accounts,
 	assetValuations,
 	bankConnections,
 	copilotThreads,
+	externalConnections,
+	investmentSourceAccounts,
 	investmentSourcePositions,
 	investmentSourceTransactionRevisions,
 	providerCredentials,
 	recurringPayments,
 	transactions,
 } from "@/server/db/schema";
+import { readScalableBrokerSnapshot } from "@/server/providers/investment/scalable-hosted-cli";
 import {
 	balanceHistory,
 	createAccount,
@@ -40,10 +43,14 @@ import {
 	updateCategory,
 } from "@/server/services/categories";
 import {
+	automaticSyncInterval,
 	disconnect,
+	isAutomaticSyncDue,
 	listConnections,
+	PRESENT_SYNC_INTERVAL_MS,
 	removeConnection,
 	syncConnection,
+	UNATTENDED_SYNC_INTERVAL_MS,
 } from "@/server/services/connections";
 import {
 	attachContractDocument,
@@ -60,9 +67,12 @@ import {
 	remember,
 } from "@/server/services/copilot-memory";
 import {
+	completedCallbackMarker,
+	failEnableBankingConnection,
 	findEnableBankingAccount,
 	hasEnableBankingSession,
 	providerAccountRef,
+	wasRecentlyCompleted,
 } from "@/server/services/enable-banking";
 import {
 	getFinancialProfile,
@@ -79,6 +89,7 @@ import {
 	listInvestmentSourcePositions,
 	listInvestmentSourceTransactionPage,
 	listInvestmentSourceTransactions,
+	StaleScalableReadError,
 } from "@/server/services/investment-sources";
 import {
 	createLiability,
@@ -111,11 +122,22 @@ import { createRule } from "@/server/services/rules";
 import {
 	beginScalableHostedConnection,
 	disconnectScalableHosted,
+	saveScalableReadSessionRotation,
 	scalableHostedStatus,
 	scalableMarketPulse,
 	syncScalableHostedDue,
 } from "@/server/services/scalable-hosted";
+import {
+	claimScalableReadOperation,
+	scalableReadLockKey,
+	withScalableReadSessionLock,
+} from "@/server/services/scalable-read-lock";
 import { getSettings, updateSettings } from "@/server/services/settings";
+import {
+	withAutomaticBankSyncLock,
+	withBankConnectionLock,
+	withBankSyncFenceTransaction,
+} from "@/server/services/sync-coalescing";
 import {
 	alteredTextSince,
 	deleteTransaction,
@@ -176,6 +198,7 @@ d("financial flows against PostgreSQL", () => {
 	afterAll(async () => {
 		await db.delete(user).where(eq(user.id, userId));
 		await pool.end();
+		await bankSyncLockPool.end();
 	});
 
 	it("persists menu visibility per owner and rejects essential routes", async () => {
@@ -590,6 +613,338 @@ d("financial flows against PostgreSQL", () => {
 		expect((await listConnections(userId)).some((c) => c.id === row.id)).toBe(
 			false,
 		);
+	});
+
+	it("excludes sync, disconnect and remove across PostgreSQL sessions", async () => {
+		const [row] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Gesperrte Bank",
+				status: "active",
+				encryptedSecret: encryptSecret(
+					JSON.stringify({ sessionId: "lock-session", accountUids: [] }),
+				),
+			})
+			.returning();
+		let started!: () => void;
+		let release!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const first = withBankConnectionLock(userId, row.id, async () => {
+			started();
+			await blocked;
+		});
+		await entered;
+		await expect(
+			withBankConnectionLock(userId, row.id, async () => undefined),
+		).rejects.toMatchObject({ code: "CONFLICT" });
+		await expect(disconnect(userId, row.id)).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		await expect(removeConnection(userId, row.id)).rejects.toMatchObject({
+			code: "CONFLICT",
+		});
+		release();
+		await first;
+		// The advisory lock is explicitly returned even after the operation ends.
+		expect(await disconnect(userId, row.id)).toEqual({ removed: true });
+
+		// Destroying the PostgreSQL session simulates a crashed replica. The
+		// server releases its session advisory lock when that socket closes.
+		const [crashRow] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Crash Recovery Bank",
+				status: "active",
+			})
+			.returning();
+		const crashed = await pool.connect();
+		await crashed.query("select pg_advisory_lock(hashtextextended($1, 0))", [
+			`fortuna:bank-sync:${userId}:${crashRow.id}`,
+		]);
+		crashed.release(true);
+		await expect(
+			withBankConnectionLock(userId, crashRow.id, async () => "recovered"),
+		).resolves.toBe("recovered");
+	});
+
+	it("keeps callback contention from overwriting state and recognizes replay across replicas", async () => {
+		const state = `callback-${randomUUID()}`;
+		const [pending] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Callback Testbank",
+				status: "pending",
+				providerConnectionId: state,
+				encryptedSecret: encryptSecret(JSON.stringify({ state })),
+			})
+			.returning();
+
+		let release!: () => void;
+		let started!: () => void;
+		const entered = new Promise<void>((resolve) => {
+			started = resolve;
+		});
+		const blocked = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const held = withBankConnectionLock(userId, pending.id, async () => {
+			started();
+			await blocked;
+		});
+		await entered;
+		await failEnableBankingConnection(state, "Stale callback failure");
+		const stillPending = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, pending.id),
+		});
+		expect(stillPending?.status).toBe("pending");
+		release();
+		await held;
+		await failEnableBankingConnection(state, "Provider callback failed");
+		const failed = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, pending.id),
+		});
+		expect(failed?.status).toBe("error");
+
+		const replayState = `replay-${randomUUID()}`;
+		await db.insert(bankConnections).values({
+			userId,
+			provider: "enable-banking",
+			institutionName: "Replay Testbank",
+			status: "error",
+			providerConnectionId: completedCallbackMarker(
+				replayState,
+				Date.now() - 1_000,
+			),
+		});
+		expect(await wasRecentlyCompleted(replayState)).toBe(true);
+		const expiredReplay = `expired-${randomUUID()}`;
+		await db.insert(bankConnections).values({
+			userId,
+			provider: "enable-banking",
+			institutionName: "Expired Replay Testbank",
+			status: "active",
+			providerConnectionId: completedCallbackMarker(
+				expiredReplay,
+				Date.now() - 11 * 60_000,
+			),
+		});
+		expect(await wasRecentlyCompleted(expiredReplay)).toBe(false);
+	});
+
+	it("rechecks a stale automatic-sync candidate after acquiring the lock", async () => {
+		const [row] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Due Recheck Bank",
+				status: "active",
+				encryptedSecret: encryptSecret(
+					JSON.stringify({ sessionId: "due-recheck", accountUids: ["uid"] }),
+				),
+				lastSyncAt: new Date(Date.now() - 7 * 60 * 60_000),
+			})
+			.returning();
+		const staleSnapshot = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, row.id),
+		});
+		if (!staleSnapshot) throw new Error("Fixture connection was not created");
+		expect(
+			isAutomaticSyncDue(
+				staleSnapshot,
+				new Date(),
+				automaticSyncInterval(staleSnapshot, null),
+			),
+		).toBe(true);
+
+		// Replica A finishes after replica B collected its due list. B must use
+		// the persisted completion time once it owns the lock.
+		await withBankConnectionLock(userId, row.id, async () => {
+			await db
+				.update(bankConnections)
+				.set({ lastSyncAt: new Date(), status: "active" })
+				.where(eq(bankConnections.id, row.id));
+		});
+
+		let providerReads = 0;
+		const result = await withAutomaticBankSyncLock(
+			userId,
+			row.id,
+			async () => {
+				const current = await db.query.bankConnections.findFirst({
+					where: eq(bankConnections.id, row.id),
+				});
+				return Boolean(
+					current &&
+						isAutomaticSyncDue(
+							current,
+							new Date(),
+							automaticSyncInterval(current, null),
+						),
+				);
+			},
+			async () => {
+				providerReads += 1;
+				return "read";
+			},
+		);
+		expect(result).toBeNull();
+		expect(providerReads).toBe(0);
+	});
+
+	it("persists the bank's rejection of attended PSU headers", async () => {
+		const [row] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "PSU Pacing Testbank",
+				status: "active",
+				encryptedSecret: encryptSecret(
+					JSON.stringify({ sessionId: "pacing", accountUids: ["uid"] }),
+				),
+				automaticRetryAt: new Date(Date.now() - 1_000),
+				presenceHeadersRateLimited: true,
+			})
+			.returning();
+		const persisted = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, row.id),
+		});
+		if (!persisted) throw new Error("Fixture connection was not created");
+		const presence = {
+			ipAddress: null,
+			userAgent: "test",
+			accept: null,
+			acceptCharset: null,
+			acceptEncoding: null,
+			acceptLanguage: null,
+			referer: null,
+		};
+		expect(persisted.presenceHeadersRateLimited).toBe(true);
+		expect(automaticSyncInterval(persisted, presence)).toBe(
+			UNATTENDED_SYNC_INTERVAL_MS,
+		);
+		expect(
+			automaticSyncInterval(
+				{ ...persisted, presenceHeadersRateLimited: false },
+				presence,
+			),
+		).toBe(PRESENT_SYNC_INTERVAL_MS);
+	});
+
+	it("fences stale writes and serializes an in-flight write before the next epoch", async () => {
+		const [row] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Fence Testbank",
+				status: "active",
+			})
+			.returning();
+		let entered!: () => void;
+		let release!: () => void;
+		const transactionEntered = new Promise<void>((resolve) => {
+			entered = resolve;
+		});
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+
+		await withBankConnectionLock(userId, row.id, async (fence) => {
+			const currentWrite = withBankSyncFenceTransaction(fence, async (tx) => {
+				await tx
+					.update(bankConnections)
+					.set({ lastError: "current transaction started" })
+					.where(eq(bankConnections.id, row.id));
+				entered();
+				await held;
+				await tx
+					.update(bankConnections)
+					.set({ lastError: "current transaction committed" })
+					.where(eq(bankConnections.id, row.id));
+			});
+			await transactionEntered;
+
+			let epochAdvanced = false;
+			const nextEpoch = db
+				.update(bankConnections)
+				.set({ syncEpoch: sql`${bankConnections.syncEpoch} + 1` })
+				.where(eq(bankConnections.id, row.id))
+				.returning({ epoch: bankConnections.syncEpoch })
+				.then(([updated]) => {
+					epochAdvanced = true;
+					return updated.epoch;
+				});
+			await new Promise((resolve) => setTimeout(resolve, 25));
+			expect(epochAdvanced).toBe(false);
+			release();
+			await currentWrite;
+			const newEpoch = await nextEpoch;
+			expect(newEpoch).toBeGreaterThan(fence.epoch);
+			await expect(
+				withBankSyncFenceTransaction(fence, async (tx) =>
+					tx
+						.update(bankConnections)
+						.set({ lastError: "stale write" })
+						.where(eq(bankConnections.id, row.id)),
+				),
+			).rejects.toMatchObject({ name: "BankSyncFenceLostError" });
+		});
+
+		const final = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, row.id),
+		});
+		expect(final?.lastError).toBe("current transaction committed");
+	});
+
+	it("does not reset an errored connection's automatic retry clock while fencing", async () => {
+		const old = new Date(Date.now() - 2 * 60 * 60_000);
+		const [row] = await db
+			.insert(bankConnections)
+			.values({
+				userId,
+				provider: "enable-banking",
+				institutionName: "Retry Clock Testbank",
+				status: "error",
+				encryptedSecret: encryptSecret(
+					JSON.stringify({ sessionId: "retry", accountUids: ["uid"] }),
+				),
+				lastSyncAt: new Date(Date.now() - 8 * 60 * 60_000),
+				updatedAt: old,
+			})
+			.returning();
+		const before = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, row.id),
+		});
+		if (!before) throw new Error("Fixture connection was not created");
+		expect(
+			isAutomaticSyncDue(
+				before,
+				new Date(),
+				automaticSyncInterval(before, null),
+			),
+		).toBe(true);
+		await withBankConnectionLock(userId, row.id, async () => undefined);
+		const after = await db.query.bankConnections.findFirst({
+			where: eq(bankConnections.id, row.id),
+		});
+		if (!after) throw new Error("Fixture connection disappeared");
+		expect(after.updatedAt).toEqual(before.updatedAt);
+		expect(
+			isAutomaticSyncDue(after, new Date(), automaticSyncInterval(after, null)),
+		).toBe(true);
 	});
 
 	it("keeps accounts and transactions when a connection with data is removed", async () => {
@@ -1894,6 +2249,8 @@ d("financial flows against PostgreSQL", () => {
 			join(tmpdir(), "fortuna-hosted-integration-"),
 		);
 		const binary = join(directory, "sc");
+		const loginCalls = join(directory, "login-calls.log");
+		const pulseCalls = join(directory, "pulse-calls.log");
 		const previous = process.env.FORTUNA_SCALABLE_CLI_BIN;
 		// Both timestamps are relative to now, never a fixed hour. A quote dated
 		// before its own baseline valuation is deliberately not treated as a
@@ -1905,15 +2262,17 @@ d("financial flows against PostgreSQL", () => {
 set -eu
 dir="$XDG_CONFIG_HOME/scalable-cli"
 if [ "$1" = login ]; then
+  echo login >> "${loginCalls}"
   printf 'Open this URL:\\nhttps://login.scalable.capital/device?user_code=TEST-1234\\n\\nVerify the code TEST-1234 in your browser.\\n'
   printf '%s' '{"session":{"access_token":"test-access","refresh_token":"test-refresh"}}' > "$dir/session.json"
   printf '%s' '{"kty":"EC","crv":"P-256","d":"test-scalar"}' > "$dir/auth-signing-key.json"
+  sleep 1
   exit 0
 fi
 if [ "$1" = broker ]; then
   case "$2" in
     overview) printf '%s' '{"ok":true,"data":{"account_id":"hosted-account","portfolio_id":"hosted-portfolio","result":{"valuation":{"total":"100"},"timestamps":{"valuation_timestamp_utc":"${at}"}}}}' ;;
-    holdings) printf '%s' '{"ok":true,"data":{"account_id":"hosted-account","portfolio_id":"hosted-portfolio","result":{"items":[{"isin":"IE00B4L5Y983","name":"Hosted ETF","quantity":"1","valuation":"100","valuation_currency":"EUR","quote_mid_price":"101","quote_currency":"EUR","quote_timestamp_utc":"${quoteAt}","quote_is_outdated":false}]}}}' ;;
+    holdings) echo holdings >> "${pulseCalls}"; printf '%s' '{"ok":true,"data":{"account_id":"hosted-account","portfolio_id":"hosted-portfolio","result":{"items":[{"isin":"IE00B4L5Y983","name":"Hosted ETF","quantity":"1","valuation":"100","valuation_currency":"EUR","quote_mid_price":"101","quote_currency":"EUR","quote_timestamp_utc":"${quoteAt}","quote_is_outdated":false}]}}}' ;;
     cash-breakdown) printf '%s' '{"ok":true,"data":{"account_id":"hosted-account","portfolio_id":"hosted-portfolio","result":{"cash_balance":"5"}}}' ;;
     transactions) printf '%s' '{"ok":true,"data":{"account_id":"hosted-account","portfolio_id":"hosted-portfolio","result":{"cursor":null,"items":[]}}}' ;;
     *) exit 9 ;;
@@ -1925,10 +2284,23 @@ exit 9
 `;
 		try {
 			await writeFile(binary, fake);
+			await writeFile(loginCalls, "");
+			await writeFile(pulseCalls, "");
 			await chmod(binary, 0o700);
 			process.env.FORTUNA_SCALABLE_CLI_BIN = binary;
-			const prompt = await beginScalableHostedConnection(userId);
+			const [prompt, secondPrompt] = await Promise.all([
+				beginScalableHostedConnection(userId),
+				beginScalableHostedConnection(userId),
+			]);
 			expect(prompt).toMatchObject({ code: "TEST-1234" });
+			expect(secondPrompt).toEqual(prompt);
+			expect(await scalableHostedStatus(userId)).toMatchObject({
+				status: "pending",
+				pending: true,
+			});
+			expect(
+				(await readFile(loginCalls, "utf8")).trim().split("\n"),
+			).toHaveLength(1);
 			let status = await scalableHostedStatus(userId);
 			for (let attempt = 0; attempt < 40 && !status.lastSyncAt; attempt++) {
 				await new Promise((resolve) => setTimeout(resolve, 50));
@@ -1949,6 +2321,17 @@ exit 9
 				confirmedNetWorthMinor: confirmed.netWorthMinor,
 				indicativeNetWorthMinor: confirmed.netWorthMinor + 100,
 			});
+			const pulseCallsBeforeRepeat = (await readFile(pulseCalls, "utf8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean).length;
+			const pulseAgain = await scalableMarketPulse(userId);
+			expect(pulseAgain.status).toBe("available");
+			const pulseCallsAfterRepeat = (await readFile(pulseCalls, "utf8"))
+				.trim()
+				.split("\n")
+				.filter(Boolean).length;
+			expect(pulseCallsAfterRepeat).toBe(pulseCallsBeforeRepeat + 1);
 			expect((await currentNetWorth(userId)).netWorthMinor).toBe(
 				confirmed.netWorthMinor,
 			);
@@ -1961,6 +2344,232 @@ exit 9
 		} finally {
 			if (previous === undefined) delete process.env.FORTUNA_SCALABLE_CLI_BIN;
 			else process.env.FORTUNA_SCALABLE_CLI_BIN = previous;
+			await rm(directory, { recursive: true, force: true });
+		}
+	});
+
+	it("queues a Scalable pulse behind a read sync across independent callers", async () => {
+		let active = 0;
+		let maximumActive = 0;
+		const order: string[] = [];
+		let signalSyncStarted: () => void = () => undefined;
+		const syncStarted = new Promise<void>((resolve) => {
+			signalSyncStarted = resolve;
+		});
+		const sync = withScalableReadSessionLock(userId, async () => {
+			active++;
+			maximumActive = Math.max(maximumActive, active);
+			order.push("sync:start");
+			signalSyncStarted();
+			await new Promise((resolve) => setTimeout(resolve, 100));
+			order.push("sync:end");
+			active--;
+		});
+		await syncStarted;
+		const pulse = withScalableReadSessionLock(userId, async () => {
+			active++;
+			maximumActive = Math.max(maximumActive, active);
+			order.push("pulse:start");
+			await new Promise((resolve) => setTimeout(resolve, 10));
+			order.push("pulse:end");
+			active--;
+		});
+		await Promise.all([sync, pulse]);
+		expect(maximumActive).toBe(1);
+		expect(order).toEqual([
+			"sync:start",
+			"sync:end",
+			"pulse:start",
+			"pulse:end",
+		]);
+	});
+
+	it("refuses stale Scalable credential rotations", async () => {
+		const testUser = `it-${randomUUID()}`;
+		await db.insert(user).values({
+			id: testUser,
+			name: "Rotation CAS",
+			email: `${testUser}@example.invalid`,
+		});
+		try {
+			const initial = encryptSecret(
+				JSON.stringify({
+					kind: "cli_session",
+					version: 1,
+					session: "old",
+					signingKey: "old-key",
+				}),
+			);
+			const [connection] = await db
+				.insert(externalConnections)
+				.values({
+					userId: testUser,
+					provider: "scalable_hosted_cli",
+					status: "active",
+					encryptedSecret: initial,
+				})
+				.returning({ id: externalConnections.id });
+			const firstWriter = saveScalableReadSessionRotation(
+				connection.id,
+				initial,
+				0,
+			);
+			const staleWriter = saveScalableReadSessionRotation(
+				connection.id,
+				initial,
+				0,
+			);
+			await firstWriter({
+				session: "rotated-session",
+				signingKey: "rotated-key",
+			});
+			await expect(
+				staleWriter({ session: "stale-session", signingKey: "stale-key" }),
+			).rejects.toThrow("rotated on another replica");
+			const afterStaleWrite = await db.query.externalConnections.findFirst({
+				where: eq(externalConnections.id, connection.id),
+				columns: { encryptedSecret: true },
+			});
+			expect(afterStaleWrite?.encryptedSecret).not.toBe(initial);
+			await firstWriter({
+				session: "rotated-again",
+				signingKey: "rotated-key-again",
+			});
+		} finally {
+			await db.delete(user).where(eq(user.id, testUser));
+		}
+	});
+
+	it("fences a stale two-session Scalable read before it writes a snapshot", async () => {
+		const testUser = `it-${randomUUID()}`;
+		const directory = await mkdtemp(join(tmpdir(), "fortuna-stale-scalable-"));
+		const binary = join(directory, "sc");
+		const previousBinary = process.env.FORTUNA_SCALABLE_CLI_BIN;
+		const oldClient = await pool.connect();
+		const newClient = await pool.connect();
+		let oldReleased = false;
+		let newReleased = false;
+		let newLockAcquired = false;
+		const now = `${today}T08:00:00Z`;
+		const fakeCli = `#!/bin/sh
+set -eu
+if [ "$1" = broker ]; then
+  case "$2" in
+    overview) printf '%s' '{"ok":true,"data":{"account_id":"fence-account","portfolio_id":"fence-portfolio","result":{"valuation":{"total":"4700.00","securities":"4500.00","crypto":"200.00"},"timestamps":{"valuation_timestamp_utc":"${now}"}}}}' ;;
+    holdings) printf '%s' '{"ok":true,"data":{"account_id":"fence-account","portfolio_id":"fence-portfolio","result":{"items":[{"isin":"IE00B4L5Y983","name":"Fence ETF","quantity":"45","fifo_price":"90","valuation":"4500","valuation_currency":"EUR","quote_mid_price":"100","quote_currency":"EUR","quote_timestamp_utc":"${now}"}]}}}' ;;
+    cash-breakdown) printf '%s' '{"ok":true,"data":{"account_id":"fence-account","portfolio_id":"fence-portfolio","result":{"cash_balance":"69","buying_power":"5000"}}}' ;;
+    transactions) printf '%s' '{"ok":true,"data":{"account_id":"fence-account","portfolio_id":"fence-portfolio","result":{"cursor":null,"items":[]}}}' ;;
+    *) exit 9 ;;
+  esac
+  exit 0
+fi
+exit 9
+`;
+		try {
+			await db.insert(user).values({
+				id: testUser,
+				name: "Stale read fence",
+				email: `${testUser}@example.invalid`,
+			});
+			const auth = {
+				session:
+					'{"session":{"access_token":"fence-access","refresh_token":"fence-refresh"}}',
+				signingKey: '{"kty":"EC","crv":"P-256","d":"fence-scalar"}',
+			};
+			const encryptedSecret = encryptSecret(
+				JSON.stringify({ kind: "cli_session", version: 1, ...auth }),
+			);
+			const [connection] = await db
+				.insert(externalConnections)
+				.values({
+					userId: testUser,
+					provider: "scalable_hosted_cli",
+					status: "active",
+					encryptedSecret,
+				})
+				.returning({ id: externalConnections.id });
+
+			const lockKey = scalableReadLockKey(testUser);
+			await oldClient.query("select pg_advisory_lock($1::bigint)", [lockKey]);
+			const oldPid = (
+				await oldClient.query<{ pid: number }>("select pg_backend_pid() as pid")
+			).rows[0].pid;
+			const staleClaim = await claimScalableReadOperation(testUser, {
+				client: oldClient,
+				assertHeld: async () => undefined,
+			});
+			expect(staleClaim).toBeTruthy();
+			oldClient.release(new Error("synthetic lost lock session"));
+			oldReleased = true;
+
+			await newClient.query("select pg_advisory_lock($1::bigint)", [lockKey]);
+			newLockAcquired = true;
+			const newPid = (
+				await newClient.query<{ pid: number }>("select pg_backend_pid() as pid")
+			).rows[0].pid;
+			expect(newPid).not.toBe(oldPid);
+			const currentClaim = await claimScalableReadOperation(testUser, {
+				client: newClient,
+				assertHeld: async () => undefined,
+			});
+			expect(currentClaim?.generation).toBe((staleClaim?.generation ?? 0) + 1);
+			await newClient.query("select pg_advisory_unlock($1::bigint)", [lockKey]);
+			newLockAcquired = false;
+			newClient.release();
+			newReleased = true;
+
+			await writeFile(binary, fakeCli);
+			await chmod(binary, 0o700);
+			process.env.FORTUNA_SCALABLE_CLI_BIN = binary;
+			const bundle = await readScalableBrokerSnapshot(
+				auth,
+				async () => undefined,
+			);
+			await expect(
+				readScalableBrokerSnapshot(
+					auth,
+					saveScalableReadSessionRotation(
+						connection.id,
+						encryptedSecret,
+						staleClaim?.generation ?? -1,
+					),
+				),
+			).rejects.toThrow("rotated on another replica");
+			await expect(
+				ingestScalableCliSnapshot(testUser, bundle, {
+					connectionId: connection.id,
+					generation: staleClaim?.generation ?? -1,
+				}),
+			).rejects.toBeInstanceOf(StaleScalableReadError);
+			expect(
+				await db
+					.select({ id: investmentSourceAccounts.id })
+					.from(investmentSourceAccounts)
+					.where(eq(investmentSourceAccounts.userId, testUser)),
+			).toEqual([]);
+			const currentConnection = await db.query.externalConnections.findFirst({
+				where: eq(externalConnections.id, connection.id),
+				columns: { encryptedSecret: true, scalableReadGeneration: true },
+			});
+			expect(currentConnection?.encryptedSecret).toBe(encryptedSecret);
+			expect(currentConnection?.scalableReadGeneration).toBe(
+				currentClaim?.generation,
+			);
+		} finally {
+			if (!oldReleased) oldClient.release();
+			if (!newReleased) {
+				if (newLockAcquired)
+					await newClient
+						.query("select pg_advisory_unlock($1::bigint)", [
+							scalableReadLockKey(testUser),
+						])
+						.catch(() => undefined);
+				newClient.release();
+			}
+			if (previousBinary === undefined)
+				delete process.env.FORTUNA_SCALABLE_CLI_BIN;
+			else process.env.FORTUNA_SCALABLE_CLI_BIN = previousBinary;
+			await db.delete(user).where(eq(user.id, testUser));
 			await rm(directory, { recursive: true, force: true });
 		}
 	});

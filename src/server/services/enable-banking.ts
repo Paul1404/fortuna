@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { ORPCError } from "@orpc/server";
 import {
 	and,
 	desc,
@@ -7,6 +8,7 @@ import {
 	ilike,
 	inArray,
 	isNull,
+	like,
 	ne,
 	or,
 	sql,
@@ -54,12 +56,32 @@ import {
 } from "@/server/providers/bank/psu-presence";
 import { recordBalance } from "./accounts";
 import { loadEnableBankingCredential } from "./provider-credentials";
-import { coalesceSync } from "./sync-coalescing";
+import {
+	type BankSyncFence,
+	BankSyncFenceLostError,
+	type BankSyncTx,
+	coalesceSync,
+	withBankConnectionLock,
+	withBankSyncFenceTransaction,
+	withUserBankSyncFenceTransaction,
+} from "./sync-coalescing";
 import { alteredTextSince, insertTransactions } from "./transactions";
 
 type ObjectValue = Record<string, unknown>;
 type StoredSession = { sessionId: string; accountUids: string[] };
 export const ENABLE_BANKING_RATE_LIMIT_RETRY_MS = 6 * 60 * 60 * 1_000;
+
+function fetchWithFence(signal: AbortSignal): typeof fetch {
+	return (input, init = {}) => {
+		const signals = [signal, init.signal].filter(
+			(candidate): candidate is AbortSignal => Boolean(candidate),
+		);
+		return fetch(input, {
+			...init,
+			signal: AbortSignal.any(signals),
+		});
+	};
+}
 
 function storedSession(encryptedSecret: string | null): StoredSession | null {
 	if (!encryptedSecret) return null;
@@ -167,6 +189,7 @@ export async function findEnableBankingAccount(
 	uid: string,
 	reference: string | null,
 	currency: string,
+	fence?: BankSyncFence,
 ): Promise<{ account: Account | null; superseded: boolean }> {
 	const exact = await db.query.accounts.findFirst({
 		where: and(
@@ -226,25 +249,29 @@ export async function findEnableBankingAccount(
 	if (owner && owner.createdAt > connection.createdAt) {
 		return { account: null, superseded: true };
 	}
-	const [relinked] = await db
-		.update(accounts)
-		.set({
-			bankConnectionId: connection.id,
-			providerAccountId: uid,
-			// Stamp it on a relink too, so an account that predates the column
-			// stops depending on its IBAN from the next renewal onwards.
-			providerAccountRef: identity,
-			syncStatus: "synced",
-		})
-		.where(
-			and(
-				eq(accounts.id, account.id),
-				owner
-					? eq(accounts.bankConnectionId, owner.id)
-					: isNull(accounts.bankConnectionId),
-			),
-		)
-		.returning();
+	const relink = async (tx: BankSyncTx) =>
+		tx
+			.update(accounts)
+			.set({
+				bankConnectionId: connection.id,
+				providerAccountId: uid,
+				// Stamp it on a relink too, so an account that predates the column
+				// stops depending on its IBAN from the next renewal onwards.
+				providerAccountRef: identity,
+				syncStatus: "synced",
+			})
+			.where(
+				and(
+					eq(accounts.id, account.id),
+					owner
+						? eq(accounts.bankConnectionId, owner.id)
+						: isNull(accounts.bankConnectionId),
+				),
+			)
+			.returning();
+	const [relinked] = fence
+		? await withBankSyncFenceTransaction(fence, relink)
+		: await db.transaction((tx) => relink(tx));
 	return { account: relinked ?? null, superseded: !relinked };
 }
 
@@ -511,6 +538,7 @@ export async function expireUnreportedPending(
 	}[],
 	readFrom: string | null,
 	today: string,
+	fence?: BankSyncFence,
 ): Promise<number> {
 	const held = await heldProviderRows(accountId);
 	if (!held.length) return 0;
@@ -525,7 +553,7 @@ export async function expireUnreportedPending(
 		today,
 	);
 	if (!ids.length) return 0;
-	const removed = await db.transaction(async (tx) => {
+	const removeRows = async (tx: BankSyncTx) => {
 		const pending = await tx
 			.select({ id: transactions.id })
 			.from(transactions)
@@ -552,7 +580,10 @@ export async function expireUnreportedPending(
 			.delete(transactions)
 			.where(inArray(transactions.id, pendingIds))
 			.returning({ id: transactions.id });
-	});
+	};
+	const removed = fence
+		? await withBankSyncFenceTransaction(fence, removeRows)
+		: await db.transaction((tx) => removeRows(tx));
 	return removed.length;
 }
 
@@ -626,20 +657,38 @@ export async function beginEnableBankingConnection(
 	return { redirectUrl: started.url };
 }
 
-// A bank can deliver the same redirect twice. The first call rotates the state
-// off the connection, so the second finds nothing and used to report a failure
-// for an authorization that had just succeeded.
-const recentlyCompleted = new Map<string, number>();
+// Store only a digest of the one-time state in providerConnectionId. This
+// preserves duplicate-callback success across replicas without retaining the
+// raw callback state after the authorization completes.
 const REPLAY_WINDOW_MS = 10 * 60 * 1_000;
 
-export function wasRecentlyCompleted(state: string): boolean {
-	const at = recentlyCompleted.get(state);
-	if (!at) return false;
-	if (Date.now() - at > REPLAY_WINDOW_MS) {
-		recentlyCompleted.delete(state);
-		return false;
-	}
-	return true;
+export function completedCallbackMarker(
+	state: string,
+	completedAt = Date.now(),
+): string {
+	const digest = createHash("sha256").update(state).digest("hex");
+	return `completed:${digest}:${completedAt}`;
+}
+
+export async function wasRecentlyCompleted(state: string): Promise<boolean> {
+	const prefix = completedCallbackMarker(state, 0).replace(/:0$/, ":");
+	const row = await db.query.bankConnections.findFirst({
+		where: and(
+			eq(bankConnections.provider, "enable-banking"),
+			inArray(bankConnections.status, ["active", "error"]),
+			like(bankConnections.providerConnectionId, `${prefix}%`),
+		),
+	});
+	const timestamp = row?.providerConnectionId
+		?.slice(prefix.length)
+		.match(/^(\d+)(?::paced)?$/)?.[1];
+	const completedAt = Number(timestamp);
+	const elapsed = Date.now() - completedAt;
+	return (
+		Number.isSafeInteger(completedAt) &&
+		elapsed >= 0 &&
+		elapsed <= REPLAY_WINDOW_MS
+	);
 }
 
 export async function completeEnableBankingConnection(
@@ -658,6 +707,37 @@ export async function completeEnableBankingConnection(
 			"connection_not_found",
 			"Zu dieser Rückmeldung gibt es in Fortuna keine offene Bankfreigabe. Bitte erneut verbinden.",
 		);
+	return withBankConnectionLock(
+		connection.userId,
+		connection.id,
+		async (fence) => {
+			// A callback can wait behind an earlier callback after its initial read.
+			// Revalidate the one-time state after taking the distributed lock so a
+			// stale snapshot cannot exchange the same authorization code twice.
+			const current = await db.query.bankConnections.findFirst({
+				where: and(
+					eq(bankConnections.id, connection.id),
+					eq(bankConnections.provider, "enable-banking"),
+					eq(bankConnections.providerConnectionId, state),
+					inArray(bankConnections.status, ["pending", "error"]),
+				),
+			});
+			if (!current)
+				throw new EnableBankingAuthorizationError(
+					"connection_not_found",
+					"Zu dieser Rückmeldung gibt es in Fortuna keine offene Bankfreigabe. Bitte erneut verbinden.",
+				);
+			return completeEnableBankingConnectionLocked(current, state, code, fence);
+		},
+	);
+}
+
+async function completeEnableBankingConnectionLocked(
+	connection: BankConnection,
+	state: string,
+	code: string,
+	fence: BankSyncFence,
+): Promise<{ imported: number; duplicates: number; accountsLinked: number }> {
 	const pending = connection.encryptedSecret
 		? object(JSON.parse(decryptSecret(connection.encryptedSecret)))
 		: null;
@@ -672,7 +752,11 @@ export async function completeEnableBankingConnection(
 			"credential_missing",
 			"Der Enable-Banking-Schlüssel fehlt. Bitte zuerst hinterlegen.",
 		);
-	const session = await authorizeEnableBankingSession(credential, code);
+	const session = await authorizeEnableBankingSession(
+		credential,
+		code,
+		fetchWithFence(fence.signal),
+	);
 	const sessionId = text(session.session_id);
 	if (!sessionId)
 		throw new EnableBankingAuthorizationError(
@@ -686,27 +770,28 @@ export async function completeEnableBankingConnection(
 	const stored: StoredSession = { sessionId, accountUids: uids };
 	const grantedUntil = text(object(session.access)?.valid_until);
 	const consentExpiresAt = grantedUntil ? new Date(grantedUntil) : null;
-	await db
-		.update(bankConnections)
-		.set({
-			// Rotated off the state value so a replayed callback matches nothing.
-			// The session id itself stays in the encrypted secret.
-			providerConnectionId: randomUUID(),
-			encryptedSecret: encryptSecret(JSON.stringify(stored)),
-			...(consentExpiresAt && !Number.isNaN(consentExpiresAt.getTime())
-				? { consentExpiresAt }
-				: {}),
-			status: "active",
-			lastError: null,
-		})
-		.where(eq(bankConnections.id, connection.id));
-	recentlyCompleted.set(state, Date.now());
+	await withBankSyncFenceTransaction(fence, (tx) =>
+		tx
+			.update(bankConnections)
+			.set({
+				// Rotated off the state value so a replayed callback matches nothing.
+				// The session id itself stays in the encrypted secret.
+				providerConnectionId: completedCallbackMarker(state),
+				encryptedSecret: encryptSecret(JSON.stringify(stored)),
+				...(consentExpiresAt && !Number.isNaN(consentExpiresAt.getTime())
+					? { consentExpiresAt }
+					: {}),
+				status: "active",
+				lastError: null,
+			})
+			.where(eq(bankConnections.id, connection.id)),
+	);
 	try {
 		// Through the same gate as Abgleichen and the automatic sync: the row is
 		// active from the update above, so another open tab could start its own
 		// read of the same session and create the same accounts a second time.
 		const result = await coalesceSync(connection.userId, connection.id, () =>
-			syncEnableBankingConnection(connection.userId, connection.id),
+			syncEnableBankingConnection(connection.userId, connection.id, fence),
 		);
 		logger.info("Enable Banking authorization completed", {
 			event: "enable_banking.authorization.completed",
@@ -720,21 +805,23 @@ export async function completeEnableBankingConnection(
 			error instanceof EnableBankingSyncError ? error.cause : error;
 		const rateLimited =
 			failure instanceof EnableBankingApiError && failure.status === 429;
-		await db
-			.update(bankConnections)
-			.set({
-				status: "error",
-				// The state value was rotated moments ago, so the callback's own
-				// message can no longer find this row. Say it here instead: the
-				// approval did succeed and only the first read failed.
-				lastError: rateLimited
-					? "Banklimit erreicht (HTTP 429). Bis zum nächsten Versuch bleiben die letzten Kontostände erhalten."
-					: 'Bankfreigabe wurde bestätigt, der erste Abruf ist aber fehlgeschlagen. Mit „Abgleichen" erneut versuchen.',
-				automaticRetryAt: rateLimited
-					? new Date(Date.now() + ENABLE_BANKING_RATE_LIMIT_RETRY_MS)
-					: null,
-			})
-			.where(eq(bankConnections.id, connection.id));
+		await withBankSyncFenceTransaction(fence, (tx) =>
+			tx
+				.update(bankConnections)
+				.set({
+					status: "error",
+					// The state value was rotated moments ago, so the callback's own
+					// message can no longer find this row. Say it here instead: the
+					// approval did succeed and only the first read failed.
+					lastError: rateLimited
+						? "Banklimit erreicht (HTTP 429). Bis zum nächsten Versuch bleiben die letzten Kontostände erhalten."
+						: 'Bankfreigabe wurde bestätigt, der erste Abruf ist aber fehlgeschlagen. Mit „Abgleichen" erneut versuchen.',
+					automaticRetryAt: rateLimited
+						? new Date(Date.now() + ENABLE_BANKING_RATE_LIMIT_RETRY_MS)
+						: null,
+				})
+				.where(eq(bankConnections.id, connection.id)),
+		);
 		throw error;
 	}
 }
@@ -743,25 +830,47 @@ export async function failEnableBankingConnection(
 	state: string,
 	message = "Bankfreigabe wurde nicht abgeschlossen.",
 ): Promise<void> {
-	await db
-		.update(bankConnections)
-		.set({
-			status: "error",
-			lastError: message.slice(0, 200),
-		})
-		.where(
-			and(
-				eq(bankConnections.provider, "enable-banking"),
-				eq(bankConnections.providerConnectionId, state),
-			),
+	const connection = await db.query.bankConnections.findFirst({
+		where: and(
+			eq(bankConnections.provider, "enable-banking"),
+			eq(bankConnections.providerConnectionId, state),
+			inArray(bankConnections.status, ["pending", "error"]),
+		),
+	});
+	if (!connection) return;
+	try {
+		await withBankConnectionLock(connection.userId, connection.id, (fence) =>
+			withBankSyncFenceTransaction(fence, async (tx) => {
+				const current = await tx.query.bankConnections.findFirst({
+					where: and(
+						eq(bankConnections.id, connection.id),
+						eq(bankConnections.provider, "enable-banking"),
+						eq(bankConnections.providerConnectionId, state),
+						inArray(bankConnections.status, ["pending", "error"]),
+					),
+				});
+				if (!current) return;
+				await tx
+					.update(bankConnections)
+					.set({ status: "error", lastError: message.slice(0, 200) })
+					.where(eq(bankConnections.id, connection.id));
+			}),
 		);
+	} catch (error) {
+		// Another callback owns this connection. It will persist its own outcome;
+		// this stale callback must not overwrite that status after losing the lock.
+		if (error instanceof ORPCError && error.code === "CONFLICT") return;
+		throw error;
+	}
 }
 
 export async function syncEnableBankingConnection(
 	userId: string,
 	id: string,
+	fence: BankSyncFence,
 	presence: PsuPresence | null = null,
 ) {
+	const fetcher = fetchWithFence(fence.signal);
 	let stage = "connection_lookup";
 	try {
 		const connection = await db.query.bankConnections.findFirst({
@@ -785,6 +894,7 @@ export async function syncEnableBankingConnection(
 					credential,
 					connection.institutionName,
 					connection.institutionCountry,
+					fetcher,
 				).catch(() => null)
 			: [];
 		const psuHeaders =
@@ -810,6 +920,7 @@ export async function syncEnableBankingConnection(
 			const session = await getEnableBankingSession(
 				credential,
 				stored.sessionId,
+				fetcher,
 			);
 			const uids = accountUids(session);
 			const sessionStatus = text(session.status);
@@ -855,12 +966,14 @@ export async function syncEnableBankingConnection(
 			// account up once the bank does share it.
 			if (uids.length > 0) {
 				stored.accountUids = uids;
-				await db
-					.update(bankConnections)
-					.set({
-						encryptedSecret: encryptSecret(JSON.stringify(stored)),
-					})
-					.where(eq(bankConnections.id, connection.id));
+				await withBankSyncFenceTransaction(fence, (tx) =>
+					tx
+						.update(bankConnections)
+						.set({
+							encryptedSecret: encryptSecret(JSON.stringify(stored)),
+						})
+						.where(eq(bankConnections.id, connection.id)),
+				);
 			}
 		}
 		let accountsLinked = 0;
@@ -870,8 +983,8 @@ export async function syncEnableBankingConnection(
 		for (const uid of stored.accountUids) {
 			stage = "account_read";
 			const [details, balances] = await Promise.all([
-				getEnableBankingAccountDetails(credential, uid, fetch, psuHeaders),
-				getEnableBankingBalances(credential, uid, fetch, psuHeaders),
+				getEnableBankingAccountDetails(credential, uid, fetcher, psuHeaders),
+				getEnableBankingBalances(credential, uid, fetcher, psuHeaders),
 			]);
 			const currency = text(details.currency) ?? "EUR";
 			const balance = selectBankBalance(balances, currency);
@@ -883,57 +996,57 @@ export async function syncEnableBankingConnection(
 				uid,
 				reference,
 				balance.currency,
+				fence,
 			);
 			if (match.superseded) continue;
 			let account = match.account;
 			if (!account) {
 				stage = "account_create";
-				[account] = await db
-					.insert(accounts)
-					.values({
-						userId,
-						// Never `details.name`: banks answer that with the account
-						// holder, so three connected accounts all came back called
-						// "Alex Beispiel".
-						name: providerAccountName({
+				[account] = await withBankSyncFenceTransaction(fence, async (tx) => {
+					const names = await tx
+						.select({ name: accounts.name })
+						.from(accounts)
+						.where(eq(accounts.userId, userId));
+					return tx
+						.insert(accounts)
+						.values({
+							userId,
+							// Never `details.name`: banks answer that with the account
+							// holder, so three connected accounts all came back called
+							// "Alex Beispiel".
+							name: providerAccountName({
+								institution: connection.institutionName,
+								product: text(details.product),
+								typeLabel:
+									ACCOUNT_TYPE_LABELS[
+										accountType(
+											details.cash_account_type,
+											connection.institutionName,
+										)
+									],
+								reference,
+								taken: new Set(names.map((row) => row.name)),
+							}),
 							institution: connection.institutionName,
-							product: text(details.product),
-							typeLabel:
-								ACCOUNT_TYPE_LABELS[
-									accountType(
-										details.cash_account_type,
-										connection.institutionName,
-									)
-								],
-							reference,
-							taken: new Set(
-								(
-									await db
-										.select({ name: accounts.name })
-										.from(accounts)
-										.where(eq(accounts.userId, userId))
-								).map((row) => row.name),
+							type: accountType(
+								details.cash_account_type,
+								connection.institutionName,
 							),
-						}),
-						institution: connection.institutionName,
-						type: accountType(
-							details.cash_account_type,
-							connection.institutionName,
-						),
-						currency: balance.currency,
-						iban: nestedText(details.account_id, "iban"),
-						currentBalanceMinor: balance.minor ?? 0,
-						// Without a readable balance there is no "as of" to claim.
-						// Leaving the date empty keeps the account out of the
-						// roll-forward's same-day rule and marks it, through the
-						// existing data-quality view, as a balance still to confirm.
-						balanceAsOf: balance.minor === null ? null : balance.date,
-						syncStatus: "synced",
-						bankConnectionId: id,
-						providerAccountId: uid,
-						providerAccountRef: reference,
-					})
-					.returning();
+							currency: balance.currency,
+							iban: nestedText(details.account_id, "iban"),
+							currentBalanceMinor: balance.minor ?? 0,
+							// Without a readable balance there is no "as of" to claim.
+							// Leaving the date empty keeps the account out of the
+							// roll-forward's same-day rule and marks it, through the
+							// existing data-quality view, as a balance still to confirm.
+							balanceAsOf: balance.minor === null ? null : balance.date,
+							syncStatus: "synced",
+							bankConnectionId: id,
+							providerAccountId: uid,
+							providerAccountRef: reference,
+						})
+						.returning();
+				});
 				accountsLinked += 1;
 			}
 			stage = "latest_transaction";
@@ -973,7 +1086,7 @@ export async function syncEnableBankingConnection(
 				credential,
 				uid,
 				readFrom,
-				fetch,
+				fetcher,
 				psuHeaders,
 			);
 			const enriched = await enrichEnableBankingTransactions(
@@ -991,7 +1104,7 @@ export async function syncEnableBankingConnection(
 						(!bankTransactionDetails(row).purpose && !text(row.note))
 					);
 				},
-				fetch,
+				fetcher,
 				psuHeaders,
 			);
 			const mapped = mapTransactions(
@@ -1001,19 +1114,21 @@ export async function syncEnableBankingConnection(
 				rawTransactions,
 			);
 			stage = "import_job";
-			const [job] = await db
-				.insert(importJobs)
-				.values({
-					userId,
-					kind: "provider_sync",
-					accountId: account.id,
-					bankConnectionId: id,
-					status: "completed",
-					totalRows: mapped.length,
-				})
-				.returning();
+			const [job] = await withBankSyncFenceTransaction(fence, (tx) =>
+				tx
+					.insert(importJobs)
+					.values({
+						userId,
+						kind: "provider_sync",
+						accountId: account.id,
+						bankConnectionId: id,
+						status: "completed",
+						totalRows: mapped.length,
+					})
+					.returning(),
+			);
 			stage = "transaction_import";
-			const result = await db.transaction((tx) =>
+			const result = await withBankSyncFenceTransaction(fence, (tx) =>
 				insertTransactions(
 					userId,
 					account.id,
@@ -1030,6 +1145,7 @@ export async function syncEnableBankingConnection(
 				mapped,
 				readFrom,
 				todayIso(),
+				fence,
 			);
 			expired += expiredHere;
 			stage = "balance_record";
@@ -1058,45 +1174,61 @@ export async function syncEnableBankingConnection(
 			// anchor the account at 0 as of today and stop every booking from
 			// ever moving it.
 			if (balance.minor !== null)
-				await recordBalance(userId, {
-					accountId: account.id,
-					date: balance.date,
-					balanceMinor: balance.minor,
-					source: "provider",
-				});
+				await withBankSyncFenceTransaction(fence, (tx) =>
+					recordBalance(
+						userId,
+						{
+							accountId: account.id,
+							date: balance.date,
+							balanceMinor: balance.minor as number,
+							source: "provider",
+						},
+						tx,
+					),
+				);
 			stage = "import_job_update";
-			await db
-				.update(importJobs)
-				.set({
-					importedRows: result.inserted.length,
-					duplicateRows: result.duplicates,
-					log: [
-						`${result.inserted.length} importiert, ${result.duplicates} Duplikate`,
-						...(expiredHere
-							? [
-									`${expiredHere} Vormerkungen entfernt, die die Bank nicht mehr meldet`,
-								]
-							: []),
-					],
-				})
-				.where(eq(importJobs.id, job.id));
+			await withBankSyncFenceTransaction(fence, (tx) =>
+				tx
+					.update(importJobs)
+					.set({
+						importedRows: result.inserted.length,
+						duplicateRows: result.duplicates,
+						log: [
+							`${result.inserted.length} importiert, ${result.duplicates} Duplikate`,
+							...(expiredHere
+								? [
+										`${expiredHere} Vormerkungen entfernt, die die Bank nicht mehr meldet`,
+									]
+								: []),
+						],
+					})
+					.where(eq(importJobs.id, job.id)),
+			);
 		}
 		stage = "connection_update";
-		await db
-			.update(bankConnections)
-			.set({
-				status: "active",
-				lastSyncAt: new Date(),
-				lastError: null,
-				automaticRetryAt: null,
-			})
-			.where(eq(bankConnections.id, id));
+		const consentExpired = Boolean(
+			connection.consentExpiresAt && connection.consentExpiresAt <= new Date(),
+		);
+		await withBankSyncFenceTransaction(fence, (tx) =>
+			tx
+				.update(bankConnections)
+				.set({
+					status: consentExpired ? "expired" : "active",
+					lastSyncAt: new Date(),
+					lastError: consentExpired
+						? "Bankfreigabe abgelaufen. Bitte erneut verbinden."
+						: null,
+					automaticRetryAt: null,
+				})
+				.where(eq(bankConnections.id, id)),
+		);
 		// After new rows have landed, not before: a PayPal payment and the bank
 		// debit that funded it usually arrive in the same sync.
 		stage = "paypal_funding";
-		const funding = await linkPaypalFunding(userId).catch(() => ({
-			linked: 0,
-		}));
+		const funding = await linkPaypalFunding(userId, fence).catch((error) => {
+			if (error instanceof BankSyncFenceLostError) throw error;
+			return { linked: 0 };
+		});
 		return {
 			accountsLinked,
 			imported,
@@ -1124,104 +1256,112 @@ export async function syncEnableBankingConnection(
  */
 export async function linkPaypalFunding(
 	userId: string,
+	fence?: BankSyncFence,
 ): Promise<{ linked: number }> {
-	const paypalAccounts = await db
-		.select({ id: accounts.id })
-		.from(accounts)
-		.innerJoin(
-			bankConnections,
-			eq(bankConnections.id, accounts.bankConnectionId),
-		)
-		.where(
-			and(
-				eq(accounts.userId, userId),
-				ilike(bankConnections.institutionName, "%paypal%"),
-			),
-		);
-	if (paypalAccounts.length === 0) return { linked: 0 };
-	const paypalIds = paypalAccounts.map((row) => row.id);
-
-	const since = addDays(todayIso(), -400);
-	const candidates = await db
-		.select({
-			id: transactions.id,
-			accountId: transactions.accountId,
-			bookingDate: transactions.bookingDate,
-			amountMinor: transactions.amountMinor,
-			currency: transactions.currency,
-			description: transactions.description,
-			counterpartyName: transactions.counterpartyName,
-			merchantName: transactions.merchantName,
-			categoryId: transactions.categoryId,
-			categorySource: transactions.categorySource,
-			transferGroupId: transactions.transferGroupId,
-		})
-		.from(transactions)
-		.where(
-			and(
-				eq(transactions.userId, userId),
-				gte(transactions.bookingDate, since),
-			),
-		);
-
-	const isPaypalAccount = (accountId: string) => paypalIds.includes(accountId);
-	const namesPaypal = (row: (typeof candidates)[number]) =>
-		/paypal/i.test(
-			`${row.description} ${row.counterpartyName ?? ""} ${row.merchantName ?? ""}`,
-		);
-	const bank = candidates.filter(
-		(row) =>
-			!isPaypalAccount(row.accountId) &&
-			namesPaypal(row) &&
-			row.amountMinor < 0 &&
-			!row.transferGroupId &&
-			// The owner's own decision outranks this.
-			row.categorySource !== "manual",
-	);
-	const paypal = candidates.filter((row) => isPaypalAccount(row.accountId));
-	// Matched over every candidate, linked or not, so a debit linked in an
-	// earlier run keeps its PayPal payment and that payment cannot be handed
-	// to a second debit of the same amount. Only the pairs not yet written
-	// are new; re-writing the old ones counted every link again on each run.
-	const pairs = matchPaypalFunding(bank, paypal);
-	if (pairs.length === 0) return { linked: 0 };
-	const existing = await fundingCategory(userId);
-	const bankById = new Map(bank.map((row) => [row.id, row]));
-	const fresh = pairs.filter(
-		(pair) =>
-			!existing || bankById.get(pair.bankId)?.categoryId !== existing.id,
-	);
-	if (fresh.length === 0) return { linked: 0 };
-
-	const category = existing ?? (await createFundingCategory(userId));
-	let linked = 0;
-	for (const pair of fresh) {
-		const updated = await db
-			.update(transactions)
-			.set({ categoryId: category.id, categorySource: "rule" })
+	const link = async (tx: BankSyncTx): Promise<{ linked: number }> => {
+		const paypalAccounts = await tx
+			.select({ id: accounts.id })
+			.from(accounts)
+			.innerJoin(
+				bankConnections,
+				eq(bankConnections.id, accounts.bankConnectionId),
+			)
 			.where(
 				and(
-					eq(transactions.id, pair.bankId),
-					eq(transactions.userId, userId),
-					// Re-checked at write time: the review could have run in between.
-					sql`${transactions.categorySource} is distinct from 'manual'`,
-					sql`${transactions.categoryId} is distinct from ${category.id}`,
+					eq(accounts.userId, userId),
+					ilike(bankConnections.institutionName, "%paypal%"),
 				),
-			)
-			.returning({ id: transactions.id });
-		linked += updated.length;
-	}
-	if (linked > 0)
+			);
+		if (paypalAccounts.length === 0) return { linked: 0 };
+		const paypalIds = paypalAccounts.map((row) => row.id);
+
+		const since = addDays(todayIso(), -400);
+		const candidates = await tx
+			.select({
+				id: transactions.id,
+				accountId: transactions.accountId,
+				bookingDate: transactions.bookingDate,
+				amountMinor: transactions.amountMinor,
+				currency: transactions.currency,
+				description: transactions.description,
+				counterpartyName: transactions.counterpartyName,
+				merchantName: transactions.merchantName,
+				categoryId: transactions.categoryId,
+				categorySource: transactions.categorySource,
+				transferGroupId: transactions.transferGroupId,
+			})
+			.from(transactions)
+			.where(
+				and(
+					eq(transactions.userId, userId),
+					gte(transactions.bookingDate, since),
+				),
+			);
+
+		const isPaypalAccount = (accountId: string) =>
+			paypalIds.includes(accountId);
+		const namesPaypal = (row: (typeof candidates)[number]) =>
+			/paypal/i.test(
+				`${row.description} ${row.counterpartyName ?? ""} ${row.merchantName ?? ""}`,
+			);
+		const bank = candidates.filter(
+			(row) =>
+				!isPaypalAccount(row.accountId) &&
+				namesPaypal(row) &&
+				row.amountMinor < 0 &&
+				!row.transferGroupId &&
+				// The owner's own decision outranks this.
+				row.categorySource !== "manual",
+		);
+		const paypal = candidates.filter((row) => isPaypalAccount(row.accountId));
+		// Matched over every candidate, linked or not, so a debit linked in an
+		// earlier run keeps its PayPal payment and that payment cannot be handed
+		// to a second debit of the same amount. Only the pairs not yet written
+		// are new; re-writing the old ones counted every link again on each run.
+		const pairs = matchPaypalFunding(bank, paypal);
+		if (pairs.length === 0) return { linked: 0 };
+		const existing = await fundingCategory(userId, tx);
+		const bankById = new Map(bank.map((row) => [row.id, row]));
+		const fresh = pairs.filter(
+			(pair) =>
+				!existing || bankById.get(pair.bankId)?.categoryId !== existing.id,
+		);
+		if (fresh.length === 0) return { linked: 0 };
+
+		const category = existing ?? (await createFundingCategory(userId, tx));
+		let linked = 0;
+		for (const pair of fresh) {
+			const updated = await tx
+				.update(transactions)
+				.set({ categoryId: category.id, categorySource: "rule" })
+				.where(
+					and(
+						eq(transactions.id, pair.bankId),
+						eq(transactions.userId, userId),
+						// Re-checked at write time: the review could have run in between.
+						sql`${transactions.categorySource} is distinct from 'manual'`,
+						sql`${transactions.categoryId} is distinct from ${category.id}`,
+					),
+				)
+				.returning({ id: transactions.id });
+			linked += updated.length;
+		}
+		return { linked };
+	};
+	const result = fence
+		? await withBankSyncFenceTransaction(fence, link)
+		: await withUserBankSyncFenceTransaction(userId, link);
+	if (result.linked > 0)
 		logger.info("PayPal funding linked", {
 			event: "enable_banking.paypal_funding.linked",
 			userId,
-			linked,
+			linked: result.linked,
 		});
-	return { linked };
+	return result;
 }
 
-function fundingCategory(userId: string) {
-	return db.query.categories.findFirst({
+function fundingCategory(userId: string, tx: BankSyncTx) {
+	return tx.query.categories.findFirst({
 		where: and(
 			eq(categories.userId, userId),
 			eq(categories.slug, "paypal-funding"),
@@ -1230,8 +1370,8 @@ function fundingCategory(userId: string) {
 }
 
 /** The category the bank leg lands in, created once and named for what it is. */
-async function createFundingCategory(userId: string) {
-	const [created] = await db
+async function createFundingCategory(userId: string, tx: BankSyncTx) {
+	const [created] = await tx
 		.insert(categories)
 		.values({
 			userId,

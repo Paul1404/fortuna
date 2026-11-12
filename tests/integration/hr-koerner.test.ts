@@ -7,6 +7,7 @@ import { user } from "@/server/db/auth-schema";
 import { financialObservations } from "@/server/db/schema";
 import { createAccount } from "@/server/services/accounts";
 import {
+	claimReviewRun,
 	estimatePurchaseImpact,
 	getFinancialProfile,
 	getInvestmentRules,
@@ -222,5 +223,24 @@ d("Hr. Körner persistence against PostgreSQL", () => {
 		expect(reserve.basis).not.toBe("history");
 		expect(reserve.reserveMinor).toBe(500_000);
 		expect(reserve.binding).toBe("minimum");
+	});
+
+	it("atomically claims an automatic review across concurrent callers", async () => {
+		const freshUser = `it-${randomUUID()}`;
+		await db.insert(user).values({
+			id: freshUser,
+			name: "Synthetic",
+			email: `${freshUser}@example.invalid`,
+		});
+		try {
+			const results = await Promise.all(
+				Array.from({ length: 8 }, () =>
+					claimReviewRun(freshUser, false, new Date()),
+				),
+			);
+			expect(results.filter(Boolean)).toHaveLength(1);
+		} finally {
+			await db.delete(user).where(eq(user.id, freshUser));
+		}
 	});
 });
