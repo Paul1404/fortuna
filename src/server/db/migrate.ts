@@ -10,9 +10,34 @@ import { db, pool } from "./index";
 
 async function main(): Promise<void> {
 	const startedAt = performance.now();
-	await migrate(db, { migrationsFolder: "./drizzle" });
-	const repaired = await repairAfterMigrations();
-	const owner = await ensureOwnerFromEnv();
+	const lock = await pool.connect();
+	let repaired: Record<string, number>;
+	let owner: Awaited<ReturnType<typeof ensureOwnerFromEnv>>;
+	let acquired = false;
+	try {
+		for (let attempt = 0; attempt < 120; attempt++) {
+			const result = await lock.query<{ acquired: boolean }>(
+				"select pg_try_advisory_lock($1, $2) as acquired",
+				[1179603534, 1],
+			);
+			if (result.rows[0]?.acquired) {
+				acquired = true;
+				break;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 1000));
+		}
+		if (!acquired) throw new Error("Timed out waiting for the migration lock");
+		await migrate(db, { migrationsFolder: "./drizzle" });
+		repaired = await repairAfterMigrations();
+		owner = await ensureOwnerFromEnv();
+	} finally {
+		try {
+			if (acquired)
+				await lock.query("select pg_advisory_unlock($1, $2)", [1179603534, 1]);
+		} finally {
+			lock.release();
+		}
+	}
 	await pool.end();
 	logger.info("Database migration completed", {
 		event: "database.migration.completed",

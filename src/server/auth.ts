@@ -45,6 +45,7 @@ export const auth = betterAuth({
 	},
 	rateLimit: {
 		enabled: true,
+		storage: "database",
 		window: 60,
 		max: 30,
 		customRules: {

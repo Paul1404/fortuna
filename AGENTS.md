@@ -509,6 +509,9 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   `no-store`. Never call bank, broker or model services from a health probe.
   CI exercises the built server and all authenticated routes against disposable
   PostgreSQL; those browser checks complement readiness, not replace it.
+- `/api/live` is dependency-independent liveness. Better Auth and MCP rate
+  limits use PostgreSQL; MCP stores hashed identifiers. The migrator holds a
+  PostgreSQL advisory lock while migrations, repairs and owner provisioning run.
 - Runtime secrets are provisioned separately from Git; never print them.
 - User-uploaded provider application keys live in `provider_credentials`, are
   validated server-side, encrypted through `src/server/crypto.ts`, and are
