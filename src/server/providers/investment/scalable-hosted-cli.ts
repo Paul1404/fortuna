@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+	chmod,
+	mkdir,
+	mkdtemp,
+	readFile,
+	rm,
+	writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -15,6 +22,7 @@ const EXIT_STATUS: Record<number, string> = {
 	30: "NETWORK_OR_BACKEND_ERROR",
 };
 const AUTH_EXIT_STATUS = 20;
+export const SCALABLE_TRADE_COMMAND_TIMEOUT_MS = 60_000;
 /** Scalable refused the request as Fortuna phrased it. */
 export const VALIDATION_EXIT_STATUS = 10;
 
@@ -77,6 +85,15 @@ type PendingLogin = {
 	process: ReturnType<typeof spawn>;
 	prompt: DevicePrompt | null;
 	startedAt: number;
+	workerId: string | null;
+	generation: number | null;
+};
+
+export type DeviceLoginCoordination = {
+	workerId: string;
+	generation: number;
+	onPrompt: (prompt: DevicePrompt) => Promise<boolean>;
+	isCurrent: () => Promise<boolean>;
 };
 
 const pending = new Map<string, PendingLogin>();
@@ -193,9 +210,9 @@ export function tradingLoginSlot(userId: string): string {
 
 export async function beginScalableDeviceLogin(
 	slot: string,
-	onComplete: (auth: ScalableCliAuthFiles) => Promise<void>,
+	onComplete: (auth: ScalableCliAuthFiles) => Promise<boolean | undefined>,
 	onFailure: () => Promise<void>,
-	options: { readOnly?: boolean } = {},
+	options: { readOnly?: boolean; coordination?: DeviceLoginCoordination } = {},
 ): Promise<DevicePrompt> {
 	// Every read connection logs in read-only. Only the trading login, which
 	// the owner starts on purpose, may hold a session that can place orders.
@@ -203,8 +220,15 @@ export async function beginScalableDeviceLogin(
 	const userId = slot;
 	const existing = pending.get(userId);
 	if (existing) {
-		if (existing.prompt) return existing.prompt;
-		throw new Error("Scalable-Anmeldung läuft bereits");
+		if (
+			existing.workerId === (options.coordination?.workerId ?? null) &&
+			existing.generation === (options.coordination?.generation ?? null)
+		) {
+			if (existing.prompt) return existing.prompt;
+			throw new Error("Scalable-Anmeldung läuft bereits");
+		}
+		existing.process.kill();
+		pending.delete(userId);
 	}
 	const files = await workspace();
 	const child = spawn(
@@ -220,10 +244,14 @@ export async function beginScalableDeviceLogin(
 		process: child,
 		prompt: null,
 		startedAt: Date.now(),
+		workerId: options.coordination?.workerId ?? null,
+		generation: options.coordination?.generation ?? null,
 	};
 	pending.set(userId, state);
 	let stdout = "";
 	let settled = false;
+	let promptPersisting = false;
+	let promptPersistence: Promise<boolean> | null = null;
 	let resolvePrompt: (prompt: DevicePrompt) => void = () => undefined;
 	let rejectPrompt: (error: Error) => void = () => undefined;
 	const promptPromise = new Promise<DevicePrompt>((resolve, reject) => {
@@ -231,6 +259,17 @@ export async function beginScalableDeviceLogin(
 		rejectPrompt = reject;
 	});
 	const timeout = setTimeout(() => child.kill(), 11 * 60_000);
+	const cancellationPoll = options.coordination
+		? setInterval(() => {
+				void options.coordination?.isCurrent().then(
+					(current) => {
+						if (!current) child.kill();
+					},
+					() => child.kill(),
+				);
+			}, 1_000)
+		: null;
+	cancellationPoll?.unref();
 	const promptTimeout = setTimeout(() => {
 		if (!settled) {
 			settled = true;
@@ -245,11 +284,30 @@ export async function beginScalableDeviceLogin(
 			return;
 		}
 		const prompt = parseScalableDevicePrompt(stdout);
-		if (prompt && !settled) {
+		if (prompt && !settled && !promptPersisting) {
+			promptPersisting = true;
 			settled = true;
 			clearTimeout(promptTimeout);
-			state.prompt = prompt;
-			resolvePrompt(prompt);
+			promptPersistence = options.coordination
+				? options.coordination.onPrompt(prompt)
+				: Promise.resolve(true);
+			void promptPersistence.then(
+				(stored) => {
+					if (!stored) {
+						child.kill();
+						rejectPrompt(new Error("Scalable-Anmeldung wurde abgebrochen"));
+						return;
+					}
+					state.prompt = prompt;
+					resolvePrompt(prompt);
+				},
+				() => {
+					child.kill();
+					rejectPrompt(
+						new Error("Scalable-Anmeldung konnte nicht gespeichert werden"),
+					);
+				},
+			);
 		}
 	});
 	// stderr may contain provider details. Drain it without recording or logging.
@@ -265,7 +323,8 @@ export async function beginScalableDeviceLogin(
 	child.once("close", (code) => {
 		clearTimeout(timeout);
 		clearTimeout(promptTimeout);
-		pending.delete(userId);
+		if (cancellationPoll) clearInterval(cancellationPoll);
+		if (pending.get(userId) === state) pending.delete(userId);
 		if (!settled) {
 			settled = true;
 			rejectPrompt(
@@ -274,11 +333,19 @@ export async function beginScalableDeviceLogin(
 		}
 		void (async () => {
 			try {
+				if (promptPersistence) await promptPersistence.catch(() => false);
 				if (code !== 0) {
 					await onFailure();
 					return;
 				}
-				await onComplete(await readAuthFiles(files.configDir));
+				const auth = await readAuthFiles(files.configDir);
+				if (options.coordination && !(await options.coordination.isCurrent())) {
+					await revokeScalableCliSession(auth).catch(() => undefined);
+					return;
+				}
+				const saved = await onComplete(auth);
+				if (saved === false)
+					await revokeScalableCliSession(auth).catch(() => undefined);
 			} catch {
 				await onFailure().catch(() => undefined);
 			} finally {
@@ -334,6 +401,7 @@ function runCommand(
 	env: NodeJS.ProcessEnv,
 	cwd: string,
 	timeoutMs: number,
+	onSpawn?: () => void,
 ): Promise<unknown> {
 	return new Promise((resolve, reject) => {
 		const child = spawn(cliPath(), [...args, "--json"], {
@@ -341,6 +409,7 @@ function runCommand(
 			cwd,
 			stdio: ["ignore", "pipe", "pipe"],
 		});
+		if (onSpawn) child.once("spawn", onSpawn);
 		let output = "";
 		let timedOut = false;
 		const timeout = setTimeout(() => {
@@ -648,26 +717,103 @@ export type TradeWorkspace = {
 	env: NodeJS.ProcessEnv;
 };
 
+export type PersistedTradeConfirmation = {
+	confirmationId: string;
+	fileBase64: string;
+};
+
+const TRADE_CONFIRMATION_FILE = "trade_confirmation.json";
+const MAX_TRADE_CONFIRMATION_BYTES = 1_048_576;
+
+function parseConfirmationFile(bytes: Buffer, confirmationId: string): void {
+	if (bytes.length === 0 || bytes.length > MAX_TRADE_CONFIRMATION_BYTES)
+		throw new ScalableCliError("TRADE_CONFIRMATION_FILE_INVALID");
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(bytes.toString("utf8"));
+	} catch {
+		throw new ScalableCliError("TRADE_CONFIRMATION_FILE_INVALID");
+	}
+	const pending =
+		parsed && typeof parsed === "object"
+			? (parsed as { pending?: unknown }).pending
+			: null;
+	const id =
+		pending && typeof pending === "object"
+			? (pending as { confirmation_id?: unknown }).confirmation_id
+			: null;
+	if (id !== confirmationId)
+		throw new ScalableCliError("TRADE_CONFIRMATION_FILE_MISMATCH");
+}
+
+export async function captureTradeConfirmation(
+	ws: TradeWorkspace,
+	confirmationId: string,
+): Promise<string> {
+	let bytes: Buffer;
+	try {
+		bytes = await readFile(join(ws.configDir, TRADE_CONFIRMATION_FILE));
+	} catch {
+		throw new ScalableCliError("TRADE_CONFIRMATION_FILE_MISSING");
+	}
+	parseConfirmationFile(bytes, confirmationId);
+	return bytes.toString("base64");
+}
+
+/** Rebuild the isolated, order-scoped workspace on the replica handling confirmation. */
+export async function restoreTradeWorkspace(
+	auth: ScalableCliAuthFiles,
+	order: TradeOrder,
+	confirmation?: PersistedTradeConfirmation,
+): Promise<TradeWorkspace> {
+	const ws = await workspace(auth, tradeConfig(order));
+	if (!confirmation) return ws;
+	try {
+		if (!/^[A-Za-z0-9_-]{4,128}$/.test(confirmation.confirmationId))
+			throw new ScalableCliError("TRADE_CONFIRMATION_FILE_INVALID");
+		const bytes = Buffer.from(confirmation.fileBase64, "base64");
+		if (bytes.toString("base64") !== confirmation.fileBase64)
+			throw new ScalableCliError("TRADE_CONFIRMATION_FILE_INVALID");
+		parseConfirmationFile(bytes, confirmation.confirmationId);
+		const path = join(ws.configDir, TRADE_CONFIRMATION_FILE);
+		await writeFile(path, bytes, { mode: 0o600, flag: "wx" });
+		await chmod(path, 0o600);
+		return ws;
+	} catch (error) {
+		await closeTradeWorkspace(ws);
+		throw error;
+	}
+}
+
 async function tradeCommand(
 	ws: TradeWorkspace,
 	args: string[],
+	onSpawn?: () => void,
 ): Promise<unknown> {
 	if (!allowedTradeArgs(args))
 		throw new Error("Scalable trade allowlist rejected command");
-	return runCommand(args, ws.env, ws.root, 60_000);
+	return runCommand(
+		args,
+		ws.env,
+		ws.root,
+		SCALABLE_TRADE_COMMAND_TIMEOUT_MS,
+		onSpawn,
+	);
 }
 
 /**
- * Phase 1. Returns the CLI's preview and the workspace that holds its
- * confirmation; the caller keeps the workspace until phase 2 or expiry and
- * must close it with `closeTradeWorkspace`.
+ * Phase 1. Returns the CLI preview in an isolated workspace. The caller must
+ * capture the confirmation file before closing the workspace.
  */
 export async function previewScalableTrade(
 	auth: ScalableCliAuthFiles,
 	order: TradeOrder,
 	onRefresh: (updated: ScalableCliAuthFiles) => Promise<void>,
-): Promise<{ preview: unknown; workspace: TradeWorkspace }> {
-	const ws = await workspace(auth, tradeConfig(order));
+): Promise<{
+	preview: unknown;
+	workspace: TradeWorkspace;
+}> {
+	const ws = await restoreTradeWorkspace(auth, order);
 	try {
 		const preview = await tradeCommand(ws, tradeArgs(order)).catch(
 			async (error: unknown) => {
@@ -693,13 +839,14 @@ export async function submitScalableTrade(
 	confirmationId: string,
 	acknowledgeWarning: boolean,
 	onRefresh: (updated: ScalableCliAuthFiles) => Promise<void>,
+	onCommandStarted?: () => void,
 ): Promise<unknown> {
 	const before = await readAuthFiles(ws.configDir);
 	try {
 		const args = [...tradeArgs(order), "--confirm", confirmationId];
 		if (acknowledgeWarning && order.side === "buy")
 			args.push("--acknowledge-appropriateness-warning");
-		const result = await tradeCommand(ws, args).catch(
+		const result = await tradeCommand(ws, args, onCommandStarted).catch(
 			async (error: unknown) => {
 				await keepRotatedSession(ws.configDir, before, onRefresh);
 				throw error;

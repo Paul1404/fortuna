@@ -1,11 +1,28 @@
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises";
-import { extname, join } from "node:path";
+import type { Dirent } from "node:fs";
+import {
+	mkdir,
+	readdir,
+	readFile,
+	rm,
+	stat,
+	writeFile,
+} from "node:fs/promises";
+import { basename, extname, join } from "node:path";
 import { promisify } from "node:util";
+import { decryptBytes, encryptBytes } from "@/server/crypto";
+import {
+	deletePrivateObject,
+	getPrivateObject,
+	listPrivateObjects,
+	objectStorageMode,
+	putPrivateObject,
+} from "@/server/object-storage";
 
 const execFileAsync = promisify(execFile);
 const UPLOAD_ROOT = "/tmp/fortuna-copilot-uploads";
+const OBJECT_PREFIX = "copilot-attachments/";
 const MAX_FILES = 8;
 const MAX_FILE_BYTES = 10 * 1024 * 1024;
 const MAX_TOTAL_BYTES = 25 * 1024 * 1024;
@@ -41,6 +58,16 @@ type AttachmentMetadata = {
 	kind: AttachmentKind;
 	createdAt: number;
 	fileName: string;
+};
+
+type AttachmentStorageMode = "local" | "object_storage";
+export type CopilotAttachmentSweepResult = {
+	mode: AttachmentStorageMode;
+	checked: number;
+	deleted: number;
+	deferred: number;
+	skipped: number;
+	errors: number;
 };
 
 export type CopilotAttachmentSummary = Pick<
@@ -82,15 +109,104 @@ function directoryFor(id: string) {
 	return join(UPLOAD_ROOT, id);
 }
 
+function objectKey(id: string, part: "metadata" | "content") {
+	if (!ID_PATTERN.test(id))
+		throw new CopilotAttachmentError("Ungültiger Anhang");
+	return `${OBJECT_PREFIX}${id}/${part}.aesgcm`;
+}
+
+function attachmentStorageMode(): AttachmentStorageMode {
+	const mode = objectStorageMode();
+	if (mode === "invalid")
+		throw new CopilotAttachmentError("Der Anhangsspeicher ist nicht verfügbar");
+	return mode === "object_storage" ? "object_storage" : "local";
+}
+
+async function readStoredMetadata(id: string, mode: AttachmentStorageMode) {
+	let raw: string;
+	if (mode === "object_storage") {
+		const encrypted = Buffer.from(
+			await getPrivateObject(objectKey(id, "metadata")),
+		).toString("utf8");
+		raw = decryptBytes(encrypted).toString("utf8");
+	} else raw = await readFile(join(directoryFor(id), "meta.json"), "utf8");
+	try {
+		return JSON.parse(raw) as AttachmentMetadata;
+	} catch {
+		throw new CopilotAttachmentError("Anhang nicht gefunden");
+	}
+}
+
 async function readMetadata(id: string): Promise<AttachmentMetadata> {
-	const raw = JSON.parse(
-		await readFile(join(directoryFor(id), "meta.json"), "utf8"),
-	) as AttachmentMetadata;
-	if (raw.id !== id || Date.now() - raw.createdAt > EXPIRES_MS) {
-		await rm(directoryFor(id), { recursive: true, force: true });
+	const mode = attachmentStorageMode();
+	let raw: AttachmentMetadata;
+	try {
+		raw = await readStoredMetadata(id, mode);
+	} catch {
+		throw new CopilotAttachmentError("Anhang nicht gefunden");
+	}
+	if (
+		raw.id !== id ||
+		typeof raw.userId !== "string" ||
+		typeof raw.name !== "string" ||
+		typeof raw.type !== "string" ||
+		!Number.isInteger(raw.size) ||
+		raw.size <= 0 ||
+		raw.size > MAX_FILE_BYTES ||
+		!new Set<AttachmentKind>(["image", "pdf", "text"]).has(raw.kind) ||
+		basename(raw.fileName) !== raw.fileName ||
+		!Number.isFinite(raw.createdAt) ||
+		Date.now() - raw.createdAt < 0 ||
+		Date.now() - raw.createdAt > EXPIRES_MS
+	) {
+		await removeCopilotAttachments([id]);
 		throw new CopilotAttachmentError("Der Anhang ist abgelaufen");
 	}
 	return raw;
+}
+
+async function readContent(metadata: AttachmentMetadata) {
+	let content: Buffer;
+	try {
+		if (attachmentStorageMode() === "object_storage") {
+			const encrypted = Buffer.from(
+				await getPrivateObject(objectKey(metadata.id, "content")),
+			).toString("utf8");
+			content = decryptBytes(encrypted);
+		} else
+			content = await readFile(
+				join(directoryFor(metadata.id), metadata.fileName),
+			);
+	} catch {
+		throw new CopilotAttachmentError("Anhang nicht gefunden");
+	}
+	if (
+		content.byteLength > MAX_FILE_BYTES ||
+		content.byteLength !== metadata.size
+	)
+		throw new CopilotAttachmentError("Anhang nicht gefunden");
+	return content;
+}
+
+function scheduleLocalCleanup(directory: string) {
+	const timer = setTimeout(() => {
+		void rm(directory, { recursive: true, force: true });
+	}, EXPIRES_MS);
+	timer.unref?.();
+}
+
+async function stageLocalAttachment(
+	metadata: AttachmentMetadata,
+	content: Uint8Array,
+) {
+	const directory = directoryFor(metadata.id);
+	await mkdir(directory, { recursive: true, mode: 0o700 });
+	await writeFile(join(directory, metadata.fileName), content, { mode: 0o600 });
+	await writeFile(join(directory, "meta.json"), JSON.stringify(metadata), {
+		mode: 0o600,
+	});
+	scheduleLocalCleanup(directory);
+	return join(directory, metadata.fileName);
 }
 
 export async function storeCopilotAttachments(
@@ -119,13 +235,13 @@ export async function storeCopilotAttachments(
 			);
 		return { file, kind };
 	});
-	await mkdir(UPLOAD_ROOT, { recursive: true, mode: 0o700 });
-	await sweepExpiredUploads();
+	const mode = attachmentStorageMode();
+	if (mode === "local")
+		await mkdir(UPLOAD_ROOT, { recursive: true, mode: 0o700 });
+	await sweepExpiredUploads(mode);
 	const stored: CopilotAttachmentSummary[] = [];
 	for (const { file, kind } of classified) {
 		const id = randomUUID();
-		const directory = directoryFor(id);
-		await mkdir(directory, { recursive: true, mode: 0o700 });
 		const inferredExtension =
 			file.type === "image/png"
 				? ".png"
@@ -144,11 +260,7 @@ export async function storeCopilotAttachments(
 				.replace(/[^.a-z0-9]/g, "")
 				.slice(0, 10) || inferredExtension;
 		const fileName = `attachment${extension}`;
-		await writeFile(
-			join(directory, fileName),
-			Buffer.from(await file.arrayBuffer()),
-			{ mode: 0o600 },
-		);
+		const content = Buffer.from(await file.arrayBuffer());
 		const metadata: AttachmentMetadata = {
 			id,
 			userId,
@@ -159,47 +271,177 @@ export async function storeCopilotAttachments(
 			createdAt: Date.now(),
 			fileName,
 		};
-		await writeFile(join(directory, "meta.json"), JSON.stringify(metadata), {
-			mode: 0o600,
-		});
+		if (mode === "object_storage") {
+			try {
+				await putPrivateObject(
+					objectKey(id, "content"),
+					Buffer.from(encryptBytes(content), "utf8"),
+				);
+				await putPrivateObject(
+					objectKey(id, "metadata"),
+					Buffer.from(
+						encryptBytes(Buffer.from(JSON.stringify(metadata))),
+						"utf8",
+					),
+				);
+			} catch {
+				await Promise.all([
+					deletePrivateObject(objectKey(id, "content")).catch(() => undefined),
+					deletePrivateObject(objectKey(id, "metadata")).catch(() => undefined),
+				]);
+				throw new CopilotAttachmentError(
+					"Der Anhang konnte nicht sicher gespeichert werden",
+				);
+			}
+		} else {
+			const directory = directoryFor(id);
+			await mkdir(directory, { recursive: true, mode: 0o700 });
+			await writeFile(join(directory, fileName), content, { mode: 0o600 });
+			await writeFile(join(directory, "meta.json"), JSON.stringify(metadata), {
+				mode: 0o600,
+			});
+		}
 		stored.push(metadata);
-		const timer = setTimeout(() => {
-			void rm(directory, { recursive: true, force: true });
-		}, EXPIRES_MS);
-		timer.unref?.();
+		if (mode === "local") scheduleLocalCleanup(directoryFor(id));
 	}
 	return stored;
 }
 
 /**
- * The per-upload timer only lives as long as the process. Uploaded statements
- * and policies are plaintext on disk, so every new upload also clears anything
- * older than the expiry that a crash or restart left behind.
+ * Local temporary uploads are swept after a crash. Shared objects are listed
+ * by their private prefix and expired metadata removes the associated payload.
  */
-async function sweepExpiredUploads(): Promise<void> {
-	try {
-		const entries = await readdir(UPLOAD_ROOT, { withFileTypes: true });
-		const cutoff = Date.now() - EXPIRES_MS;
-		await Promise.all(
-			entries
-				.filter((entry) => entry.isDirectory() && ID_PATTERN.test(entry.name))
-				.map(async (entry) => {
-					const directory = join(UPLOAD_ROOT, entry.name);
-					try {
-						const raw = JSON.parse(
-							await readFile(join(directory, "meta.json"), "utf8"),
-						) as { createdAt?: number };
-						if (typeof raw.createdAt === "number" && raw.createdAt > cutoff)
-							return;
-					} catch {
-						// Unreadable metadata: the directory cannot be used anyway.
-					}
-					await rm(directory, { recursive: true, force: true });
-				}),
-		);
-	} catch {
-		// A missing or unreadable upload root is not worth failing an upload for.
+async function sweepExpiredUploads(
+	mode: AttachmentStorageMode,
+): Promise<CopilotAttachmentSweepResult> {
+	const result: CopilotAttachmentSweepResult = {
+		mode,
+		checked: 0,
+		deleted: 0,
+		deferred: 0,
+		skipped: 0,
+		errors: 0,
+	};
+	if (mode === "object_storage") {
+		let objects: Awaited<ReturnType<typeof listPrivateObjects>>;
+		try {
+			objects = await listPrivateObjects(OBJECT_PREFIX);
+		} catch {
+			result.errors += 1;
+			return result;
+		}
+		const byId = new Map<string, Map<string, Date | null>>();
+		for (const object of objects) {
+			const match = object.key.match(
+				/^copilot-attachments\/([0-9a-f-]{36})\/(metadata|content)\.aesgcm$/i,
+			);
+			if (!match) continue;
+			const parts = byId.get(match[1]) ?? new Map();
+			parts.set(match[2], object.lastModified);
+			byId.set(match[1], parts);
+		}
+		for (const [id, parts] of byId) {
+			result.checked += 1;
+			if (!parts.has("metadata")) {
+				// Upload writes content before metadata. Only collect old orphaned
+				// payloads after a five-minute grace beyond the normal TTL.
+				const lastModified = parts.get("content")?.getTime();
+				if (lastModified === undefined || !Number.isFinite(lastModified)) {
+					result.skipped += 1;
+					continue;
+				}
+				if (Date.now() - lastModified <= EXPIRES_MS + 5 * 60 * 1000) {
+					result.deferred += 1;
+					continue;
+				}
+				try {
+					await removeCopilotAttachments([id]);
+					result.deleted += 1;
+				} catch {
+					result.errors += 1;
+				}
+				continue;
+			}
+			try {
+				const metadata = await readStoredMetadata(id, mode);
+				if (
+					metadata.id === id &&
+					Number.isFinite(metadata.createdAt) &&
+					Date.now() - metadata.createdAt >= 0 &&
+					Date.now() - metadata.createdAt > EXPIRES_MS
+				) {
+					await removeCopilotAttachments([id]);
+					result.deleted += 1;
+				} else result.deferred += 1;
+			} catch {
+				// A transient GET, decryption, or parse failure never authorizes deletion.
+				result.skipped += 1;
+			}
+		}
+		return result;
 	}
+	let entries: Dirent[];
+	try {
+		entries = await readdir(UPLOAD_ROOT, { withFileTypes: true });
+	} catch (error) {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return result;
+		result.errors += 1;
+		return result;
+	}
+	for (const entry of entries.filter(
+		(entry) => entry.isDirectory() && ID_PATTERN.test(entry.name),
+	)) {
+		result.checked += 1;
+		const directory = join(UPLOAD_ROOT, entry.name);
+		let createdAt: number | undefined;
+		try {
+			const raw = JSON.parse(
+				await readFile(join(directory, "meta.json"), "utf8"),
+			) as { createdAt?: number };
+			createdAt = raw.createdAt;
+		} catch {
+			// A concurrent upload writes its content before metadata. Use directory
+			// age and a grace period before removing a directory with no metadata.
+		}
+		if (typeof createdAt === "number" && Date.now() - createdAt <= EXPIRES_MS) {
+			result.deferred += 1;
+			continue;
+		}
+		if (createdAt === undefined) {
+			try {
+				const info = await stat(directory);
+				if (Date.now() - info.mtimeMs <= EXPIRES_MS + 5 * 60 * 1000) {
+					result.deferred += 1;
+					continue;
+				}
+			} catch {
+				result.errors += 1;
+				continue;
+			}
+		}
+		try {
+			await rm(directory, { recursive: true, force: true });
+			result.deleted += 1;
+		} catch {
+			result.errors += 1;
+		}
+	}
+	return result;
+}
+
+/** Run one TTL sweep. Strict callers can fail their job when cleanup is incomplete. */
+export async function sweepCopilotAttachments(
+	options: { strict?: boolean } = {},
+) {
+	const mode = attachmentStorageMode();
+	if (mode === "local")
+		await mkdir(UPLOAD_ROOT, { recursive: true, mode: 0o700 });
+	const result = await sweepExpiredUploads(mode);
+	if (options.strict && (result.errors > 0 || result.skipped > 0))
+		throw new Error(
+			`Attachment cleanup incomplete: ${result.errors} error(s), ${result.skipped} skipped`,
+		);
+	return result;
 }
 
 async function pdfInputs(metadata: AttachmentMetadata, path: string) {
@@ -270,12 +512,15 @@ export async function resolveCopilotAttachments(
 		const metadata = await readMetadata(id);
 		if (metadata.userId !== userId)
 			throw new CopilotAttachmentError("Anhang nicht gefunden");
-		const path = join(directoryFor(id), metadata.fileName);
+		const content = await readContent(metadata);
 		if (metadata.kind === "image") {
 			promptText += `\nAnhang ${metadata.name} (attachment_id=${metadata.id}): Bilddatei.`;
-			if (inputs.length < MAX_IMAGE_INPUTS)
+			if (inputs.length < MAX_IMAGE_INPUTS) {
+				const path = await stageLocalAttachment(metadata, content);
 				inputs.push({ type: "localImage", path });
+			}
 		} else if (metadata.kind === "pdf") {
+			const path = await stageLocalAttachment(metadata, content);
 			const pdf = await pdfInputs(metadata, path);
 			const remaining = Math.max(0, MAX_CONTEXT_CHARS - promptText.length);
 			promptText += pdf.text.slice(0, remaining);
@@ -283,7 +528,7 @@ export async function resolveCopilotAttachments(
 				...pdf.images.slice(0, Math.max(0, MAX_IMAGE_INPUTS - inputs.length)),
 			);
 		} else {
-			const text = (await readFile(path)).toString("utf8").replaceAll("\0", "");
+			const text = content.toString("utf8").replaceAll("\0", "");
 			const remaining = Math.max(0, MAX_CONTEXT_CHARS - promptText.length);
 			promptText += `\n<attachment id="${metadata.id}" name=${JSON.stringify(metadata.name)} type="text">\n${text.slice(0, remaining)}\n</attachment>`;
 		}
@@ -302,8 +547,7 @@ export async function readCopilotAttachment(
 	const metadata = await readMetadata(id);
 	if (metadata.userId !== userId)
 		throw new CopilotAttachmentError("Anhang nicht gefunden");
-	const path = join(directoryFor(id), metadata.fileName);
-	const content = await readFile(path);
+	const content = await readContent(metadata);
 	let extractedText: string | null = null;
 	if (metadata.kind === "text") {
 		extractedText = content
@@ -311,6 +555,7 @@ export async function readCopilotAttachment(
 			.replaceAll("\0", "")
 			.slice(0, MAX_CONTEXT_CHARS);
 	} else if (metadata.kind === "pdf") {
+		const path = await stageLocalAttachment(metadata, content);
 		try {
 			const { stdout } = await execFileAsync(
 				"pdftotext",
@@ -320,6 +565,8 @@ export async function readCopilotAttachment(
 			extractedText = stdout.trim() ? stdout.slice(0, MAX_CONTEXT_CHARS) : null;
 		} catch {
 			extractedText = null;
+		} finally {
+			await rm(directoryFor(id), { recursive: true, force: true });
 		}
 	}
 	return { metadata, content, extractedText };
@@ -329,6 +576,12 @@ export async function removeCopilotAttachments(ids: string[]) {
 	await Promise.all(
 		ids
 			.filter((id) => ID_PATTERN.test(id))
-			.map((id) => rm(directoryFor(id), { recursive: true, force: true })),
+			.map(async (id) => {
+				await Promise.all([
+					rm(directoryFor(id), { recursive: true, force: true }),
+					deletePrivateObject(objectKey(id, "metadata")),
+					deletePrivateObject(objectKey(id, "content")),
+				]);
+			}),
 	);
 }

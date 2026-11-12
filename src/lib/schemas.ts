@@ -646,6 +646,13 @@ export const BrokerOrderSubmit = v.object({
 
 export const BrokerOrderId = v.object({ orderId: id });
 
+/** Manual owner assertion after checking an ambiguous order at Scalable. */
+export const BrokerOrderResolution = v.object({
+	orderId: id,
+	outcome: v.picklist(["found", "not_found"]),
+	confirmed: v.literal(true),
+});
+
 export const SettingsUpdate = v.object({
 	baseCurrency: v.optional(currencyCode),
 	locale: v.optional(

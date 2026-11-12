@@ -3,6 +3,7 @@ import { encryptSecret } from "@/server/crypto";
 import {
 	AUTOMATIC_SYNC_ERROR_RETRY_MS,
 	AUTOMATIC_SYNC_RATE_LIMIT_RETRY_MS,
+	automaticSyncInterval,
 	isAutomaticSyncDue,
 	PRESENT_SYNC_INTERVAL_MS,
 	UNATTENDED_SYNC_INTERVAL_MS,
@@ -20,6 +21,7 @@ function connection(overrides: Record<string, unknown> = {}) {
 		status: "active" as const,
 		encryptedSecret: grantedSession,
 		consentExpiresAt: new Date("2026-12-01T00:00:00Z"),
+		presenceHeadersRateLimited: false,
 		lastSyncAt: null,
 		automaticRetryAt: null,
 		updatedAt: new Date("2026-09-01T00:00:00Z"),
@@ -159,5 +161,28 @@ describe("automatic bank synchronization", () => {
 				retryAt,
 			),
 		).toBe(true);
+	});
+
+	it("keeps the learned unattended cadence across cooldown and restart", () => {
+		const presence = {
+			ipAddress: null,
+			userAgent: "test",
+			accept: null,
+			acceptCharset: null,
+			acceptEncoding: null,
+			acceptLanguage: null,
+			referer: null,
+		};
+		expect(
+			automaticSyncInterval(
+				connection({
+					presenceHeadersRateLimited: true,
+				}),
+				presence,
+			),
+		).toBe(UNATTENDED_SYNC_INTERVAL_MS);
+		expect(automaticSyncInterval(connection(), presence)).toBe(
+			PRESENT_SYNC_INTERVAL_MS,
+		);
 	});
 });

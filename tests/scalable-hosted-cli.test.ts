@@ -86,7 +86,10 @@ describe("hosted official CLI boundary", () => {
 		});
 		const prompt = await beginScalableDeviceLogin(
 			"test-owner",
-			async (auth) => complete(auth),
+			async (auth) => {
+				complete(auth);
+				return undefined;
+			},
 			async () => {
 				throw new Error("unexpected login failure");
 			},

@@ -107,7 +107,12 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   limit on background access. A connection whose bank accepts those headers is
   due again after five minutes; one whose bank rejects them falls back to six
   hours so four reads cover the day. The service coalesces concurrent manual
-  and automatic syncs and never uses expired consent. After a failed sync,
+  and automatic syncs in-process and holds a PostgreSQL session advisory lock
+  per connection across sync, callback and disconnect/remove operations. Each
+  lock holder increments the connection's fence epoch; every material bank
+  write checks and row-locks that epoch in its transaction, so a stale holder
+  cannot commit after a newer epoch. Lock loss also aborts provider HTTP reads.
+  It never uses expired consent. After a failed sync,
   automatic retries wait an hour; the manual Abgleichen action remains
   available immediately. Never log the PSU address or agent, a provider
   response body or credentials — only a safe error class and HTTP status.
@@ -398,6 +403,11 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
     submission triggers a read-back sync. The procedures are `mutation` /
     `sessionRead` only and must never enter `COPILOT_TOOLS` or
     `MCP_WRITE_TOOL_NAMES`.
+    The encrypted preview includes the CLI v1.2.0 confirmation file, restored
+    into the isolated workspace for submission. A result after the CLI starts
+    may be ambiguous: block further orders until the owner checks Scalable and
+    records an assertion. Never automatically retry or treat that assertion as
+    provider confirmation. Guard late result writes against replacing it.
   - Agents building on this test only against a simulated CLI
     (`tests/integration/broker-orders.test.ts`) and never place a real order.
   - A sale requires a reason ("Warum jetzt?", the owner's decision of
@@ -555,9 +565,11 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   Kataster cost and margin figures are an operational view only and must never
   contribute to accounts, transactions or net worth.
 - Fortuna Copilot runs the pinned `@openai/codex` App Server in a scrubbed child
-  environment and authenticates with ChatGPT's device-code flow. Persist only
-  its encrypted `auth.json` in `external_connections`; never return or log raw
-  tokens. Turns run in the empty Copilot workspace with restricted read-only
+  environment and authenticates with ChatGPT's device-code flow. Store its
+  `auth.json` encrypted in `external_connections`; during login that row holds
+  the encrypted device prompt and a worker lease instead. Generation and
+  ciphertext checks prevent late workers from restoring revoked credentials.
+  Never return or log raw tokens. Turns run in the empty Copilot workspace with restricted read-only
   access and receive only a bounded financial snapshot without IBANs. Dynamic
   tools may create and update Fortuna domain records, but must validate with the
   shared Valibot schemas, stay inside the session-only Copilot mutation, expose
@@ -574,10 +586,10 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   resumed thread cannot swap its tools, so old threads would keep offering
   the removed ones.
 - Build a compact base snapshot and add only the domain context selected from
-  the current question. Cache snapshots against the in-process user data
-  revision and advance that revision after every session mutation or Copilot
-  tool write. Keep browser history as recovery context for a new server thread,
-  not as repeated context for every resumed turn.
+  the current question. Recompute it for each turn so changes on another
+  replica are visible. Keep browser history as recovery context for a new server
+  thread, not as repeated context for every resumed turn. A thread that cannot
+  resume on another pod starts fresh with the bounded browser history.
 - The Copilot persona is Herr Konrad Körner, a factual, precise accountant
   who writes plain standard German. No dialect, regional colour or irony (the
   owner's decision of 01.10.2026); both prompts say so and
@@ -590,11 +602,13 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   model output through the shared safe GFM Markdown component; do not enable raw
   HTML. Keep retry from duplicating the user's visible message and keep chat
   visible chat history browser-local.
-- Copilot attachments use the bounded same-origin multipart route. Store them
-  only under the private temporary upload root, scope metadata to `userId`,
-  never log names or contents, and delete successful uploads or expire them
-  after 30 minutes. Images use App Server `localImage`; text is length-limited;
-  PDFs use Poppler text extraction with at most four rendered scan pages.
+- Copilot attachments use the bounded same-origin multipart route. Store shared
+  content and owner-scoped metadata encrypted in private object storage; local
+  staging is temporary. Never log names or contents. Delete successful uploads
+  or expire them after 30 minutes; the Fleet cleanup job runs
+  `scripts/cleanup-copilot-attachments.ts` for expired shared objects. Images
+  use App Server `localImage`; text is length-limited; PDFs use Poppler text
+  extraction with at most four rendered scan pages.
 - Durable Copilot memories hold only user-confirmed preferences, naming
   conventions and domain rules. Use a stable key so corrections replace old
   knowledge. Do not duplicate balances, transactions, contracts or credentials
@@ -808,7 +822,8 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   is booked. A provider pending row is deleted only under
   `unreportedPendingIds` (`src/domain/pending.ts`), and the read reaches back
   to the oldest such row. Every bank sync, including the callback's first
-  read, goes through `coalesceSync`.
+  read, goes through `coalesceSync`, the cross-process PostgreSQL lock and the
+  transaction-level fence.
 - Recurring and contract forecast entries pass `typicalDay` and their real
   interval, or a date clamped to a short month becomes the anchor.
 - A liability with `linked_account_id` has a stale `current_balance_minor`;

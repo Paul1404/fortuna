@@ -15,9 +15,10 @@ import {
 	preferredSourceAccounts,
 } from "@/domain/investment-source";
 import { encryptSecret } from "@/server/crypto";
-import { db } from "@/server/db";
+import { type DbOrTx, db } from "@/server/db";
 import {
 	accounts,
+	externalConnections,
 	investmentSourceAccounts,
 	investmentSourcePositions,
 	investmentSourceTransactionRevisions,
@@ -31,6 +32,35 @@ import {
 } from "@/server/providers/investment/scalable-cli";
 
 const PROVIDER = "scalable";
+
+export class StaleScalableReadError extends Error {
+	constructor() {
+		super("Scalable snapshot belongs to a stale read generation");
+		this.name = "StaleScalableReadError";
+	}
+}
+
+type ScalableReadFence = { connectionId: string; generation: number };
+
+async function assertScalableReadFence(
+	tx: DbOrTx,
+	fence: ScalableReadFence,
+): Promise<void> {
+	const [connection] = await tx
+		.select({
+			generation: externalConnections.scalableReadGeneration,
+			status: externalConnections.status,
+		})
+		.from(externalConnections)
+		.where(eq(externalConnections.id, fence.connectionId))
+		.for("update");
+	if (
+		!connection ||
+		connection.generation !== fence.generation ||
+		(connection.status !== "active" && connection.status !== "error")
+	)
+		throw new StaleScalableReadError();
+}
 
 /**
  * Stored on the depot when a snapshot could not be saved. Like every
@@ -80,32 +110,36 @@ export function scalableSyncWarning(
 export async function ingestScalableCliSnapshot(
 	userId: string,
 	bundle: ScalableCliBundle,
+	fence?: ScalableReadFence,
 ) {
 	const snapshot = parseScalableCliBundle(bundle);
 	const sourceAccountId = `broker:${snapshot.portfolioId}`;
-	const [account] = await db
-		.insert(investmentSourceAccounts)
-		.values({
-			userId,
-			provider: PROVIDER,
-			sourceAccountId,
-			method: "cli",
-			currency: snapshot.currency,
-			status: "pending",
-			capabilities: snapshot.capabilities,
-			lastAttemptedSyncAt: new Date(),
-		})
-		.onConflictDoUpdate({
-			target: [
-				investmentSourceAccounts.userId,
-				investmentSourceAccounts.provider,
-				investmentSourceAccounts.sourceAccountId,
-			],
-			set: { lastAttemptedSyncAt: new Date(), updatedAt: new Date() },
-		})
-		.returning();
+	let accountId: string | null = null;
 	try {
 		return await db.transaction(async (tx) => {
+			if (fence) await assertScalableReadFence(tx, fence);
+			const [account] = await tx
+				.insert(investmentSourceAccounts)
+				.values({
+					userId,
+					provider: PROVIDER,
+					sourceAccountId,
+					method: "cli",
+					currency: snapshot.currency,
+					status: "pending",
+					capabilities: snapshot.capabilities,
+					lastAttemptedSyncAt: new Date(),
+				})
+				.onConflictDoUpdate({
+					target: [
+						investmentSourceAccounts.userId,
+						investmentSourceAccounts.provider,
+						investmentSourceAccounts.sourceAccountId,
+					],
+					set: { lastAttemptedSyncAt: new Date(), updatedAt: new Date() },
+				})
+				.returning();
+			accountId = account.id;
 			await tx
 				.select({ id: investmentSourceAccounts.id })
 				.from(investmentSourceAccounts)
@@ -288,14 +322,27 @@ export async function ingestScalableCliSnapshot(
 			};
 		});
 	} catch (error) {
+		if (error instanceof StaleScalableReadError) throw error;
 		const errorCode = classifyInvestmentSyncFailure(error);
-		await db
-			.update(investmentSourceAccounts)
-			.set({
-				status: "error",
-				lastError: SCALABLE_INGEST_FAILED,
-			})
-			.where(eq(investmentSourceAccounts.id, account.id));
+		const failedAccountId = accountId;
+		if (failedAccountId) {
+			const markError = async (tx: DbOrTx) => {
+				if (fence) await assertScalableReadFence(tx, fence);
+				await tx
+					.update(investmentSourceAccounts)
+					.set({
+						status: "error",
+						lastError: SCALABLE_INGEST_FAILED,
+					})
+					.where(eq(investmentSourceAccounts.id, failedAccountId));
+			};
+			try {
+				if (fence) await db.transaction(markError);
+				else await markError(db);
+			} catch (markError) {
+				if (markError instanceof StaleScalableReadError) throw markError;
+			}
+		}
 		logger.warn("Scalable CLI snapshot rejected", {
 			event: "scalable.cli.sync.failed",
 			errorCode,

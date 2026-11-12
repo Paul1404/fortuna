@@ -1,5 +1,5 @@
 import { ORPCError } from "@orpc/server";
-import { and, desc, eq } from "drizzle-orm";
+import { and, desc, eq, isNotNull, lte, ne } from "drizzle-orm";
 import { db } from "@/server/db";
 import {
 	accounts,
@@ -16,7 +16,14 @@ import {
 	hasEnableBankingSession,
 	syncEnableBankingConnection,
 } from "./enable-banking";
-import { coalesceSync, isSyncing } from "./sync-coalescing";
+import type { BankSyncFence } from "./sync-coalescing";
+import {
+	coalesceSync,
+	isSyncing,
+	withAutomaticBankSyncLock,
+	withBankConnectionLock,
+	withBankSyncFenceTransaction,
+} from "./sync-coalescing";
 
 export type ConnectionRow = Omit<
 	BankConnection,
@@ -41,15 +48,6 @@ type SyncResult = {
 	imported: number;
 	duplicates: number;
 };
-
-/**
- * Connections whose bank counts a read against its daily allowance even though
- * Fortuna sent presence headers. Whether a bank honours them cannot be asked,
- * only observed: a rate limit that arrives on a read the owner was present for
- * is the bank saying it treats that read as unattended. Paced conservatively
- * from then on. In-process only, so after a restart one read re-learns it.
- */
-const rateLimitedDespitePresence = new Set<string>();
 
 function assertNotSyncing(userId: string, id: string) {
 	if (isSyncing(userId, id))
@@ -96,6 +94,17 @@ export function isAutomaticSyncDue(
 		!connection.lastSyncAt ||
 		now.getTime() - connection.lastSyncAt.getTime() >= intervalMs
 	);
+}
+
+export function automaticSyncInterval(
+	connection: Pick<BankConnection, "presenceHeadersRateLimited">,
+	presence: PsuPresence | null,
+): number {
+	// This capability observation survives cooldown expiry and successful reads,
+	// and is shared by every replica. `automaticRetryAt` remains a cooldown.
+	return presence && !connection.presenceHeadersRateLimited
+		? PRESENT_SYNC_INTERVAL_MS
+		: UNATTENDED_SYNC_INTERVAL_MS;
 }
 
 function publicRow(c: BankConnection, accountCount: number): ConnectionRow {
@@ -146,44 +155,46 @@ export async function disconnect(
 	id: string,
 ): Promise<{ removed: boolean }> {
 	assertNotSyncing(userId, id);
-	return db.transaction(async (tx) => {
-		const [row] = await tx
-			.update(bankConnections)
-			.set({
-				status: "disconnected",
-				encryptedSecret: null,
-				automaticRetryAt: null,
-				lastError: null,
-			})
-			.where(
-				and(eq(bankConnections.id, id), eq(bankConnections.userId, userId)),
-			)
-			.returning();
-		if (!row)
-			throw new ORPCError("NOT_FOUND", {
-				message: "Verbindung nicht gefunden",
-			});
-		const linked = await tx
-			.select({ id: accounts.id })
-			.from(accounts)
-			.where(
-				and(eq(accounts.userId, userId), eq(accounts.bankConnectionId, id)),
-			);
-		if (linked.length === 0) {
-			await tx.delete(bankConnections).where(eq(bankConnections.id, id));
-			logger.info("Bank connection removed", {
-				event: "connection.removed",
-				provider: row.provider,
-				accountsDetached: 0,
-			});
-			return { removed: true };
-		}
-		await tx
-			.update(accounts)
-			.set({ syncStatus: "disconnected" })
-			.where(eq(accounts.bankConnectionId, id));
-		return { removed: false };
-	});
+	return withBankConnectionLock(userId, id, (fence) =>
+		withBankSyncFenceTransaction(fence, async (tx) => {
+			const [row] = await tx
+				.update(bankConnections)
+				.set({
+					status: "disconnected",
+					encryptedSecret: null,
+					automaticRetryAt: null,
+					lastError: null,
+				})
+				.where(
+					and(eq(bankConnections.id, id), eq(bankConnections.userId, userId)),
+				)
+				.returning();
+			if (!row)
+				throw new ORPCError("NOT_FOUND", {
+					message: "Verbindung nicht gefunden",
+				});
+			const linked = await tx
+				.select({ id: accounts.id })
+				.from(accounts)
+				.where(
+					and(eq(accounts.userId, userId), eq(accounts.bankConnectionId, id)),
+				);
+			if (linked.length === 0) {
+				await tx.delete(bankConnections).where(eq(bankConnections.id, id));
+				logger.info("Bank connection removed", {
+					event: "connection.removed",
+					provider: row.provider,
+					accountsDetached: 0,
+				});
+				return { removed: true };
+			}
+			await tx
+				.update(accounts)
+				.set({ syncStatus: "disconnected" })
+				.where(eq(accounts.bankConnectionId, id));
+			return { removed: false };
+		}),
+	);
 }
 
 // Removing keeps accounts and transactions but unlinks them from the provider,
@@ -193,37 +204,38 @@ export async function removeConnection(
 	id: string,
 ): Promise<{ accountsDetached: number }> {
 	assertNotSyncing(userId, id);
-	return db.transaction(async (tx) => {
-		const row = await tx.query.bankConnections.findFirst({
-			where: and(
-				eq(bankConnections.id, id),
-				eq(bankConnections.userId, userId),
-			),
-		});
-		if (!row)
-			throw new ORPCError("NOT_FOUND", {
-				message: "Verbindung nicht gefunden",
+	return withBankConnectionLock(userId, id, (fence) =>
+		withBankSyncFenceTransaction(fence, async (tx) => {
+			const row = await tx.query.bankConnections.findFirst({
+				where: and(
+					eq(bankConnections.id, id),
+					eq(bankConnections.userId, userId),
+				),
 			});
-		const detached = await tx
-			.update(accounts)
-			.set({
-				bankConnectionId: null,
-				providerAccountId: null,
-				syncStatus: "manual",
-			})
-			.where(
-				and(eq(accounts.userId, userId), eq(accounts.bankConnectionId, id)),
-			)
-			.returning({ id: accounts.id });
-		await tx.delete(bankConnections).where(eq(bankConnections.id, id));
-		rateLimitedDespitePresence.delete(id);
-		logger.info("Bank connection removed", {
-			event: "connection.removed",
-			provider: row.provider,
-			accountsDetached: detached.length,
-		});
-		return { accountsDetached: detached.length };
-	});
+			if (!row)
+				throw new ORPCError("NOT_FOUND", {
+					message: "Verbindung nicht gefunden",
+				});
+			const detached = await tx
+				.update(accounts)
+				.set({
+					bankConnectionId: null,
+					providerAccountId: null,
+					syncStatus: "manual",
+				})
+				.where(
+					and(eq(accounts.userId, userId), eq(accounts.bankConnectionId, id)),
+				)
+				.returning({ id: accounts.id });
+			await tx.delete(bankConnections).where(eq(bankConnections.id, id));
+			logger.info("Bank connection removed", {
+				event: "connection.removed",
+				provider: row.provider,
+				accountsDetached: detached.length,
+			});
+			return { accountsDetached: detached.length };
+		}),
+	);
 }
 
 export async function syncConnection(
@@ -232,13 +244,16 @@ export async function syncConnection(
 	presence: PsuPresence | null = null,
 ): Promise<SyncResult> {
 	return coalesceSync(userId, id, () =>
-		runConnectionSync(userId, id, presence),
+		withBankConnectionLock(userId, id, (fence) =>
+			runConnectionSync(userId, id, fence, presence),
+		),
 	);
 }
 
 async function runConnectionSync(
 	userId: string,
 	id: string,
+	fence: BankSyncFence,
 	presence: PsuPresence | null = null,
 ): Promise<SyncResult> {
 	const connection = await db.query.bankConnections.findFirst({
@@ -266,7 +281,7 @@ async function runConnectionSync(
 					"Banklimit aktiv. Der nächste Versuch ist nach der angezeigten Wartezeit möglich.",
 			});
 		try {
-			return await syncEnableBankingConnection(userId, id, presence);
+			return await syncEnableBankingConnection(userId, id, fence, presence);
 		} catch (err) {
 			const failure = err instanceof EnableBankingSyncError ? err.cause : err;
 			logger.warn("Enable Banking sync failed", {
@@ -301,24 +316,26 @@ async function runConnectionSync(
 			});
 			const rateLimited =
 				failure instanceof EnableBankingApiError && failure.status === 429;
-			// Presence was claimed and the bank limited the read anyway, so this
-			// bank does not exempt owner-present reads. Pace it for four a day.
-			if (rateLimited && presence) rateLimitedDespitePresence.add(id);
 			const message = rateLimited
 				? "Banklimit erreicht (HTTP 429). Bis zum nächsten Versuch bleiben die letzten Kontostände erhalten."
 				: failure instanceof EnableBankingApiError
 					? `Bankabgleich fehlgeschlagen (HTTP ${failure.status}).`
 					: "Bankabgleich fehlgeschlagen.";
-			await db
-				.update(bankConnections)
-				.set({
-					status: "error",
-					lastError: message,
-					automaticRetryAt: rateLimited
-						? new Date(Date.now() + AUTOMATIC_SYNC_RATE_LIMIT_RETRY_MS)
-						: null,
-				})
-				.where(eq(bankConnections.id, id));
+			await withBankSyncFenceTransaction(fence, (tx) =>
+				tx
+					.update(bankConnections)
+					.set({
+						status: "error",
+						lastError: message,
+						automaticRetryAt: rateLimited
+							? new Date(Date.now() + AUTOMATIC_SYNC_RATE_LIMIT_RETRY_MS)
+							: null,
+						...(rateLimited && presence
+							? { presenceHeadersRateLimited: true }
+							: {}),
+					})
+					.where(eq(bankConnections.id, id)),
+			);
 			throw new ORPCError("INTERNAL_SERVER_ERROR", {
 				message:
 					"Abgleich fehlgeschlagen; vorhandene Daten bleiben unverändert",
@@ -347,35 +364,91 @@ export async function syncDueConnections(
 			connection.consentExpiresAt &&
 			connection.consentExpiresAt <= now,
 	);
-	await Promise.all(
+	const expiredResults = await Promise.allSettled(
 		expired.map((connection) =>
-			db
-				.update(bankConnections)
-				.set({
-					status: "expired",
-					lastError: "Bankfreigabe abgelaufen. Bitte erneut verbinden.",
-				})
-				.where(eq(bankConnections.id, connection.id)),
+			withBankConnectionLock(userId, connection.id, (fence) =>
+				withBankSyncFenceTransaction(fence, async (tx) => {
+					const current = await tx.query.bankConnections.findFirst({
+						where: and(
+							eq(bankConnections.id, connection.id),
+							eq(bankConnections.userId, userId),
+						),
+					});
+					if (
+						!current?.encryptedSecret ||
+						current.status === "disconnected" ||
+						!current.consentExpiresAt ||
+						current.consentExpiresAt > now
+					)
+						return false;
+					await tx
+						.update(bankConnections)
+						.set({
+							status: "expired",
+							lastError: "Bankfreigabe abgelaufen. Bitte erneut verbinden.",
+						})
+						.where(
+							and(
+								eq(bankConnections.id, connection.id),
+								eq(bankConnections.userId, userId),
+								ne(bankConnections.status, "disconnected"),
+								isNotNull(bankConnections.encryptedSecret),
+								lte(bankConnections.consentExpiresAt, now),
+							),
+						);
+					return true;
+				}),
+			),
 		),
 	);
+	const expiredCount = expiredResults.filter(
+		(result) => result.status === "fulfilled" && result.value,
+	).length;
 	const due = connections.filter((connection) =>
 		isAutomaticSyncDue(
 			connection,
 			now,
-			presence && !rateLimitedDespitePresence.has(connection.id)
-				? PRESENT_SYNC_INTERVAL_MS
-				: UNATTENDED_SYNC_INTERVAL_MS,
+			automaticSyncInterval(connection, presence),
 		),
 	);
 	const settled = await Promise.allSettled(
-		due.map((connection) => syncConnection(userId, connection.id, presence)),
+		due.map((connection) =>
+			coalesceSync(userId, connection.id, () =>
+				withAutomaticBankSyncLock(
+					userId,
+					connection.id,
+					async (fence) => {
+						return withBankSyncFenceTransaction(fence, async (tx) => {
+							const current = await tx.query.bankConnections.findFirst({
+								where: and(
+									eq(bankConnections.id, connection.id),
+									eq(bankConnections.userId, userId),
+								),
+							});
+							return (
+								current !== undefined &&
+								isAutomaticSyncDue(
+									current,
+									new Date(),
+									automaticSyncInterval(current, presence),
+								)
+							);
+						});
+					},
+					(fence) => runConnectionSync(userId, connection.id, fence, presence),
+				),
+			),
+		),
 	);
 	const result = settled.reduce(
 		(summary, entry) => {
 			if (entry.status === "rejected") {
+				summary.attempted += 1;
 				summary.failed += 1;
 				return summary;
 			}
+			if (entry.value === null) return summary;
+			summary.attempted += 1;
 			summary.succeeded += 1;
 			summary.accountsLinked += entry.value.accountsLinked;
 			summary.imported += entry.value.imported;
@@ -383,10 +456,10 @@ export async function syncDueConnections(
 			return summary;
 		},
 		{
-			attempted: due.length,
+			attempted: 0,
 			succeeded: 0,
 			failed: 0,
-			expired: expired.length,
+			expired: expiredCount,
 			accountsLinked: 0,
 			imported: 0,
 			duplicates: 0,

@@ -1,11 +1,12 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { ORPCError } from "@orpc/server";
 import { toJsonSchema } from "@valibot/to-json-schema";
-import { and, eq } from "drizzle-orm";
+import { and, eq, inArray, isNull, sql } from "drizzle-orm";
 import * as v from "valibot";
 import {
 	AccountInput,
@@ -46,7 +47,7 @@ import {
 } from "@/lib/schemas";
 import { copilotErrorClass } from "@/server/copilot-diagnostics";
 import { decryptSecret, encryptSecret } from "@/server/crypto";
-import { dataRevision, markDataChanged } from "@/server/data-revision";
+import { markDataChanged } from "@/server/data-revision";
 import { db } from "@/server/db";
 import { copilotThreads, externalConnections } from "@/server/db/schema";
 import { logger } from "@/server/logger";
@@ -63,6 +64,10 @@ import {
 	resolveCopilotAttachments,
 } from "./copilot-attachments";
 import * as copilotMemorySvc from "./copilot-memory";
+import {
+	CopilotOperationBusyError,
+	withCopilotOperationLock,
+} from "./copilot-operation-lock";
 import * as forecastSvc from "./forecast";
 import * as hrKoernerSvc from "./hr-koerner";
 import * as investmentAdviceSvc from "./investment-advice";
@@ -108,6 +113,8 @@ const STATE_DIR = "/tmp/fortuna-copilot-codex";
 const WORKSPACE_DIR = "/tmp/fortuna-copilot-workspace";
 const AUTH_FILE = join(STATE_DIR, "auth.json");
 const MAX_AUTH_BYTES = 256 * 1024;
+const LOGIN_LEASE_MS = 30_000;
+const LOGIN_LEASE_HEARTBEAT_MS = 8_000;
 
 type JsonRpcMessage = {
 	id?: string | number;
@@ -132,9 +139,14 @@ class AppServerClient {
 	private pending = new Map<number, PendingRequest>();
 	private listeners = new Set<NotificationListener>();
 	private closed = false;
+	private exitPromise: Promise<void>;
+	private resolveExit!: () => void;
 
 	private constructor(child: ChildProcessWithoutNullStreams) {
 		this.child = child;
+		this.exitPromise = new Promise((resolve) => {
+			this.resolveExit = resolve;
+		});
 		const lines = createInterface({ input: child.stdout });
 		lines.on("line", (line) => this.handleLine(line));
 		const fail = (error: Error) => {
@@ -144,8 +156,14 @@ class AppServerClient {
 				pending.reject(error);
 			}
 			this.pending.clear();
+			this.publish({ method: "app-server/closed", params: {} });
 		};
 		child.on("exit", (code, signal) => {
+			this.resolveExit();
+			if (singletonClient === this) singletonClient = null;
+			for (const [userId, lease] of localCopilotLoginLeases)
+				if (lease.client === this)
+					clearCopilotLoginLease(userId, lease.loginId);
 			logger.warn("Fortuna Copilot App Server exited", {
 				event: "copilot.app_server.exited",
 				code,
@@ -166,7 +184,7 @@ class AppServerClient {
 		child.stderr.resume();
 	}
 
-	static async start() {
+	static async start(onCreate?: (client: AppServerClient) => void) {
 		await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
 		await mkdir(WORKSPACE_DIR, { recursive: true, mode: 0o700 });
 		const script = join(
@@ -201,6 +219,7 @@ class AppServerClient {
 			stdio: ["pipe", "pipe", "pipe"],
 		});
 		const client = new AppServerClient(child);
+		onCreate?.(client);
 		await client.request("initialize", {
 			clientInfo: {
 				name: "fortuna_copilot",
@@ -242,7 +261,18 @@ class AppServerClient {
 			else pending.resolve(message.result);
 			return;
 		}
+		this.publish(message);
+	}
+
+	private publish(message: JsonRpcMessage) {
 		for (const listener of this.listeners) listener(message);
+	}
+
+	interruptLocally(threadId: string) {
+		this.publish({
+			method: "turn/completed",
+			params: { threadId, turn: { status: "interrupted" } },
+		});
 	}
 
 	request(method: string, params: Record<string, unknown>, timeoutMs = 30_000) {
@@ -276,19 +306,116 @@ class AppServerClient {
 		return () => this.listeners.delete(listener);
 	}
 
-	stop() {
-		this.child.kill("SIGTERM");
-		this.closed = true;
+	async stop() {
+		if (!this.closed) {
+			this.child.kill("SIGTERM");
+			this.closed = true;
+		}
+		let timeout: ReturnType<typeof setTimeout> | undefined;
+		const exited = await Promise.race([
+			this.exitPromise.then(() => true),
+			new Promise<false>((resolve) => {
+				timeout = setTimeout(() => resolve(false), 1_000);
+			}),
+		]);
+		if (timeout) clearTimeout(timeout);
+		if (!exited) {
+			this.child.kill("SIGKILL");
+			let killTimeout: ReturnType<typeof setTimeout> | undefined;
+			const killed = await Promise.race([
+				this.exitPromise.then(() => true),
+				new Promise<false>((resolve) => {
+					killTimeout = setTimeout(() => resolve(false), 1_000);
+				}),
+			]);
+			if (killTimeout) clearTimeout(killTimeout);
+			if (!killed) throw new Error("Copilot App Server did not exit");
+		}
 	}
 }
 
 let singleton: Promise<AppServerClient> | null = null;
 let singletonUserId: string | null = null;
+let singletonGeneration: bigint | null = null;
+let singletonCredentialVersion: string | null = null;
+let singletonClient: AppServerClient | null = null;
 let loadedThreadId: string | null = null;
+let generationMonitor: ReturnType<typeof setInterval> | null = null;
+let authFileQueue: Promise<void> = Promise.resolve();
+const localCopilotLoginLeases = new Map<string, LocalCopilotLoginLease>();
 const activeTurns = new Map<
 	string,
 	{ threadId: string; turnId: string | null }
 >();
+
+class CopilotRevokedError extends Error {}
+
+type CopilotLoginPrompt = {
+	loginId: string;
+	verificationUrl: string;
+	userCode: string;
+};
+
+type LocalCopilotLoginLease = {
+	loginId: string;
+	generation: bigint;
+	encryptedPrompt: string;
+	client: AppServerClient;
+	timer: ReturnType<typeof setInterval>;
+};
+
+async function withAuthFileLock<T>(operation: () => Promise<T>): Promise<T> {
+	const previous = authFileQueue;
+	let release!: () => void;
+	authFileQueue = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	await previous;
+	try {
+		return await operation();
+	} finally {
+		release();
+	}
+}
+
+async function interruptLocalTurn(userId: string): Promise<boolean> {
+	const active = activeTurns.get(userId);
+	if (!active?.threadId || !active.turnId || !singleton) return false;
+	try {
+		const client = await singleton;
+		await client.request(
+			"turn/interrupt",
+			{ threadId: active.threadId, turnId: active.turnId },
+			1_000,
+		);
+	} catch {
+		return false;
+	}
+	const deadline = Date.now() + 5_000;
+	while (activeTurns.has(userId) && Date.now() < deadline)
+		await new Promise((resolve) => setTimeout(resolve, 25));
+	return !activeTurns.has(userId);
+}
+
+async function withCopilotControlLock<T>(
+	userId: string,
+	operation: () => Promise<T>,
+): Promise<T> {
+	const wasLocalTurnInterrupted = await interruptLocalTurn(userId);
+	const deadline = Date.now() + (wasLocalTurnInterrupted ? 5_000 : 0);
+	while (true) {
+		try {
+			return await withCopilotOperationLock(userId, operation);
+		} catch (error) {
+			if (!(error instanceof CopilotOperationBusyError)) throw error;
+			if (Date.now() >= deadline)
+				throw new ORPCError("CONFLICT", {
+					message: "Herr Körner bearbeitet bereits eine Anfrage",
+				});
+			await new Promise((resolve) => setTimeout(resolve, 25));
+		}
+	}
+}
 
 async function connectionFor(userId: string) {
 	return db.query.externalConnections.findFirst({
@@ -299,25 +426,215 @@ async function connectionFor(userId: string) {
 	});
 }
 
-async function restoreAuthentication(userId: string) {
+function authGeneration(connection: Awaited<ReturnType<typeof connectionFor>>) {
+	return connection?.copilotAuthGeneration ?? 0n;
+}
+
+function authCredentialVersion(encryptedSecret: string | null | undefined) {
+	return encryptedSecret
+		? createHash("sha256").update(encryptedSecret).digest("hex")
+		: null;
+}
+
+function canonicalAuthPayload(payload: string) {
+	try {
+		const sort = (value: unknown): unknown => {
+			if (Array.isArray(value)) return value.map(sort);
+			if (!value || typeof value !== "object") return value;
+			return Object.fromEntries(
+				Object.entries(value)
+					.sort(([left], [right]) => left.localeCompare(right))
+					.map(([key, entry]) => [key, sort(entry)]),
+			);
+		};
+		return JSON.stringify(sort(JSON.parse(payload) as unknown));
+	} catch {
+		return payload;
+	}
+}
+
+function authConnectionUsable(
+	connection: Awaited<ReturnType<typeof connectionFor>>,
+) {
+	return (
+		!connection ||
+		connection.status === "active" ||
+		connection.status === "pending"
+	);
+}
+
+function decodeCopilotLoginPrompt(ciphertext: string | null | undefined) {
+	if (!ciphertext) return null;
+	try {
+		const value = JSON.parse(decryptSecret(ciphertext)) as Record<
+			string,
+			unknown
+		>;
+		if (
+			typeof value.loginId !== "string" ||
+			typeof value.verificationUrl !== "string" ||
+			typeof value.userCode !== "string"
+		)
+			return null;
+		return {
+			loginId: value.loginId,
+			verificationUrl: value.verificationUrl,
+			userCode: value.userCode,
+		} satisfies CopilotLoginPrompt;
+	} catch {
+		return null;
+	}
+}
+
+function recentCopilotLoginLease(lastAttemptedSyncAt: Date | null | undefined) {
+	if (!lastAttemptedSyncAt) return false;
+	const age = Date.now() - lastAttemptedSyncAt.getTime();
+	return age >= 0 && age < LOGIN_LEASE_MS;
+}
+
+function clearCopilotLoginLease(userId: string, loginId?: string) {
+	const lease = localCopilotLoginLeases.get(userId);
+	if (!lease || (loginId && lease.loginId !== loginId)) return;
+	clearInterval(lease.timer);
+	localCopilotLoginLeases.delete(userId);
+}
+
+function startCopilotLoginLease(
+	userId: string,
+	prompt: CopilotLoginPrompt,
+	generation: bigint,
+	encryptedPrompt: string,
+	client: AppServerClient,
+) {
+	clearCopilotLoginLease(userId);
+	const lease: LocalCopilotLoginLease = {
+		loginId: prompt.loginId,
+		generation,
+		encryptedPrompt,
+		client,
+		timer: setInterval(() => {
+			void (async () => {
+				try {
+					const [renewed] = await db
+						.update(externalConnections)
+						.set({ lastAttemptedSyncAt: new Date() })
+						.where(
+							and(
+								eq(externalConnections.userId, userId),
+								eq(externalConnections.provider, PROVIDER),
+								eq(externalConnections.status, "pending"),
+								eq(externalConnections.copilotAuthGeneration, generation),
+								eq(externalConnections.encryptedSecret, encryptedPrompt),
+							),
+						)
+						.returning({ id: externalConnections.id });
+					if (!renewed) clearCopilotLoginLease(userId, prompt.loginId);
+				} catch (error) {
+					logger.warn("Copilot login lease refresh failed", {
+						event: "copilot.auth.login_lease_failed",
+						errorClass: copilotErrorClass(error),
+					});
+				}
+			})();
+		}, LOGIN_LEASE_HEARTBEAT_MS),
+	};
+	lease.timer.unref?.();
+	localCopilotLoginLeases.set(userId, lease);
+}
+
+async function dropLocalClient(
+	userId: string,
+	expectedGeneration?: bigint,
+	expectedCredentialVersion?: string | null,
+) {
+	if (singletonUserId !== userId) return;
+	if (
+		expectedGeneration !== undefined &&
+		singletonGeneration !== expectedGeneration
+	)
+		return;
+	if (
+		expectedCredentialVersion !== undefined &&
+		singletonCredentialVersion !== expectedCredentialVersion
+	)
+		return;
+	const active = activeTurns.get(userId);
+	const current = singleton;
+	const runningClient = singletonClient;
+	singleton = null;
+	singletonUserId = null;
+	singletonGeneration = null;
+	singletonCredentialVersion = null;
+	singletonClient = null;
+	loadedThreadId = null;
+	clearCopilotLoginLease(userId);
+	if (runningClient && active?.threadId && active.turnId) {
+		await runningClient
+			.request(
+				"turn/interrupt",
+				{ threadId: active.threadId, turnId: active.turnId },
+				1_000,
+			)
+			.catch(() => undefined);
+		runningClient.interruptLocally(active.threadId);
+	}
+	if (runningClient) await runningClient.stop();
+	if (current) {
+		await current.catch(() => undefined);
+	}
+	await withAuthFileLock(async () => {
+		// A newer login may have started while the old child was exiting.
+		if (singletonUserId === null)
+			await rm(STATE_DIR, { recursive: true, force: true });
+	});
+}
+
+async function restoreAuthentication(userId: string, generation: bigint) {
 	const connection = await connectionFor(userId);
-	if (!connection?.encryptedSecret || connection.status === "disconnected") {
-		await rm(AUTH_FILE, { force: true });
+	if (
+		authGeneration(connection) !== generation ||
+		authCredentialVersion(connection?.encryptedSecret) !==
+			singletonCredentialVersion ||
+		!authConnectionUsable(connection)
+	)
+		throw new CopilotRevokedError();
+	if (!connection?.encryptedSecret || connection.status !== "active") {
+		await withAuthFileLock(async () => {
+			if (singletonUserId === userId && singletonGeneration === generation)
+				await rm(STATE_DIR, { recursive: true, force: true });
+		});
 		return;
 	}
 	const auth = decryptSecret(connection.encryptedSecret);
 	if (Buffer.byteLength(auth) > MAX_AUTH_BYTES)
 		throw new Error("Gespeicherte OpenAI-Anmeldung ist ungültig");
-	await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
-	await writeFile(AUTH_FILE, auth, { mode: 0o600 });
+	await withAuthFileLock(async () => {
+		if (singletonUserId !== userId || singletonGeneration !== generation)
+			throw new CopilotRevokedError();
+		await mkdir(STATE_DIR, { recursive: true, mode: 0o700 });
+		await writeFile(AUTH_FILE, auth, { mode: 0o600 });
+	});
 }
 
 async function clientFor(userId: string): Promise<AppServerClient> {
+	const connection = await connectionFor(userId);
+	const generation = authGeneration(connection);
+	const credentialVersion = authCredentialVersion(connection?.encryptedSecret);
 	if (singletonUserId && singletonUserId !== userId) {
 		throw new Error(
 			"Der Copilot ist bereits einem anderen Benutzer zugeordnet",
 		);
 	}
+	if (!authConnectionUsable(connection)) {
+		await dropLocalClient(userId);
+		throw new CopilotRevokedError();
+	}
+	if (
+		singleton &&
+		(singletonGeneration !== generation ||
+			singletonCredentialVersion !== credentialVersion)
+	)
+		await dropLocalClient(userId);
 	const current = singleton;
 	if (current) {
 		try {
@@ -330,44 +647,254 @@ async function clientFor(userId: string): Promise<AppServerClient> {
 		// may already have done so while this one waited.
 		if (singleton !== current) return clientFor(userId);
 		singleton = null;
+		singletonClient = null;
 		loadedThreadId = null;
 	}
 	// Assigned before any await, so concurrent callers share one child.
-	singleton = restoreAuthentication(userId).then(() => AppServerClient.start());
+	singleton = restoreAuthentication(userId, generation)
+		.then(() =>
+			AppServerClient.start((client) => {
+				if (singletonUserId === userId && singletonGeneration === generation)
+					singletonClient = client;
+				else void client.stop();
+			}),
+		)
+		.catch((error) => {
+			if (singletonUserId !== userId || singletonGeneration !== generation)
+				throw new CopilotRevokedError();
+			throw error;
+		})
+		.then(async (client) => {
+			const latest = await connectionFor(userId);
+			if (
+				authGeneration(latest) !== generation ||
+				authCredentialVersion(latest?.encryptedSecret) !== credentialVersion ||
+				!authConnectionUsable(latest)
+			) {
+				await client.stop();
+				if (singletonClient === client) singletonClient = null;
+				throw new CopilotRevokedError();
+			}
+			client.onNotification((message) => {
+				if (message.method !== "account/login/completed") return;
+				void handleCopilotLoginCompleted(userId, client, message.params).catch(
+					async (error) => {
+						logger.warn("Copilot login completion handling failed", {
+							event: "copilot.auth.login_completion_failed",
+							errorClass: copilotErrorClass(error),
+						});
+						const lease = localCopilotLoginLeases.get(userId);
+						if (lease && lease.loginId === message.params?.loginId) {
+							try {
+								await markCopilotLoginFailed(userId, lease);
+							} catch {
+								clearCopilotLoginLease(userId, lease.loginId);
+							}
+						}
+					},
+				);
+			});
+			return client;
+		});
 	singletonUserId = userId;
+	singletonGeneration = generation;
+	singletonCredentialVersion = credentialVersion;
+	startGenerationMonitor();
 	return singleton;
+}
+
+function startGenerationMonitor() {
+	if (generationMonitor) return;
+	generationMonitor = setInterval(() => {
+		void verifyCopilotAuthGeneration();
+	}, 5_000);
+	generationMonitor.unref?.();
+}
+
+export async function verifyCopilotAuthGeneration() {
+	const userId = singletonUserId;
+	const observedGeneration = singletonGeneration;
+	const observedCredentialVersion = singletonCredentialVersion;
+	if (!userId || observedGeneration === null) return "idle" as const;
+	try {
+		const connection = await connectionFor(userId);
+		if (
+			singletonUserId !== userId ||
+			singletonGeneration !== observedGeneration ||
+			singletonCredentialVersion !== observedCredentialVersion
+		)
+			return "superseded" as const;
+		if (
+			authGeneration(connection) !== observedGeneration ||
+			authCredentialVersion(connection?.encryptedSecret) !==
+				observedCredentialVersion ||
+			!authConnectionUsable(connection)
+		) {
+			await dropLocalClient(
+				userId,
+				observedGeneration,
+				observedCredentialVersion,
+			);
+			return "revoked" as const;
+		}
+		return "current" as const;
+	} catch {
+		// Fail closed on DB read failure, including active local turns.
+		await dropLocalClient(
+			userId,
+			observedGeneration,
+			observedCredentialVersion,
+		);
+		return "database_unavailable" as const;
+	}
 }
 
 async function persistAuthentication(
 	userId: string,
 	account: { email?: string | null; planType?: string | null },
+	expectedGeneration: bigint,
+	expectedCredentialVersion: string | null,
 ) {
+	const current = await connectionFor(userId);
+	if (
+		!current ||
+		authGeneration(current) !== expectedGeneration ||
+		authCredentialVersion(current.encryptedSecret) !==
+			expectedCredentialVersion ||
+		!authConnectionUsable(current)
+	)
+		return false;
 	const auth = await readFile(AUTH_FILE, "utf8");
 	if (Buffer.byteLength(auth) > MAX_AUTH_BYTES)
 		throw new Error("OpenAI-Anmeldung ist zu groß");
-	await db
-		.insert(externalConnections)
-		.values({
-			userId,
-			provider: PROVIDER,
+	if (current.encryptedSecret) {
+		try {
+			if (
+				canonicalAuthPayload(decryptSecret(current.encryptedSecret)) ===
+				canonicalAuthPayload(auth)
+			)
+				return true;
+		} catch {
+			// A broken stored token must not be replaced from a potentially stale pod.
+			return false;
+		}
+	}
+	const encryptedSecret = encryptSecret(auth);
+	const [updated] = await db
+		.update(externalConnections)
+		.set({
 			providerConnectionId: account.planType ?? "chatgpt",
 			clientId: null,
 			status: "active",
-			encryptedSecret: encryptSecret(auth),
+			encryptedSecret,
 			lastSyncAt: new Date(),
 			lastError: null,
 		})
-		.onConflictDoUpdate({
-			target: [externalConnections.userId, externalConnections.provider],
-			set: {
-				providerConnectionId: account.planType ?? "chatgpt",
-				clientId: null,
-				status: "active",
-				encryptedSecret: encryptSecret(auth),
-				lastSyncAt: new Date(),
-				lastError: null,
-			},
+		.where(
+			and(
+				eq(externalConnections.userId, userId),
+				eq(externalConnections.provider, PROVIDER),
+				eq(externalConnections.copilotAuthGeneration, expectedGeneration),
+				inArray(externalConnections.status, ["pending", "active"]),
+				current.encryptedSecret
+					? eq(externalConnections.encryptedSecret, current.encryptedSecret)
+					: isNull(externalConnections.encryptedSecret),
+			),
+		)
+		.returning({
+			copilotAuthGeneration: externalConnections.copilotAuthGeneration,
+			encryptedSecret: externalConnections.encryptedSecret,
 		});
+	if (
+		updated &&
+		singletonUserId === userId &&
+		singletonGeneration === expectedGeneration &&
+		singletonCredentialVersion === expectedCredentialVersion
+	)
+		singletonCredentialVersion = authCredentialVersion(updated.encryptedSecret);
+	return Boolean(updated);
+}
+
+async function markCopilotLoginFailed(
+	userId: string,
+	lease: LocalCopilotLoginLease,
+) {
+	const [updated] = await db
+		.update(externalConnections)
+		.set({
+			status: "error",
+			encryptedSecret: null,
+			lastError: "OpenAI-Anmeldung fehlgeschlagen",
+		})
+		.where(
+			and(
+				eq(externalConnections.userId, userId),
+				eq(externalConnections.provider, PROVIDER),
+				eq(externalConnections.status, "pending"),
+				eq(externalConnections.copilotAuthGeneration, lease.generation),
+				eq(externalConnections.encryptedSecret, lease.encryptedPrompt),
+			),
+		)
+		.returning({ id: externalConnections.id });
+	clearCopilotLoginLease(userId, lease.loginId);
+	if (updated)
+		await dropLocalClient(
+			userId,
+			lease.generation,
+			authCredentialVersion(lease.encryptedPrompt),
+		);
+}
+
+async function handleCopilotLoginCompleted(
+	userId: string,
+	client: AppServerClient,
+	paramsValue: Record<string, unknown> | undefined,
+) {
+	const loginId = paramsValue?.loginId;
+	const success = paramsValue?.success;
+	if (typeof loginId !== "string" || typeof success !== "boolean") return;
+	const lease = localCopilotLoginLeases.get(userId);
+	if (
+		!lease ||
+		lease.loginId !== loginId ||
+		singletonClient !== client ||
+		singletonUserId !== userId
+	)
+		return;
+	const connection = await connectionFor(userId);
+	if (
+		connection?.status !== "pending" ||
+		authGeneration(connection) !== lease.generation ||
+		connection.encryptedSecret !== lease.encryptedPrompt ||
+		decodeCopilotLoginPrompt(connection.encryptedSecret)?.loginId !== loginId
+	) {
+		clearCopilotLoginLease(userId, loginId);
+		return;
+	}
+	if (!success) {
+		await markCopilotLoginFailed(userId, lease);
+		return;
+	}
+	const account = accountFrom(
+		await client.request("account/read", { refreshToken: false }),
+	);
+	if (!account) {
+		await markCopilotLoginFailed(userId, lease);
+		return;
+	}
+	const persisted = await persistAuthentication(
+		userId,
+		account,
+		lease.generation,
+		authCredentialVersion(lease.encryptedPrompt),
+	);
+	clearCopilotLoginLease(userId, loginId);
+	if (!persisted)
+		await dropLocalClient(
+			userId,
+			lease.generation,
+			authCredentialVersion(lease.encryptedPrompt),
+		);
 }
 
 function accountFrom(result: unknown) {
@@ -386,11 +913,29 @@ function accountFrom(result: unknown) {
 export async function getCopilotStatus(userId: string) {
 	try {
 		const client = await clientFor(userId);
+		const generation = singletonGeneration ?? 0n;
+		const credentialVersion = singletonCredentialVersion;
 		const account = accountFrom(
 			await client.request("account/read", { refreshToken: false }),
 		);
 		if (account) {
-			await persistAuthentication(userId, account);
+			const persisted = await persistAuthentication(
+				userId,
+				account,
+				generation,
+				credentialVersion,
+			);
+			if (!persisted) {
+				await dropLocalClient(userId, generation, credentialVersion);
+				return {
+					available: true,
+					connected: false,
+					type: null,
+					email: null,
+					planType: null,
+					lastError: null,
+				};
+			}
 			return { available: true, connected: true, ...account };
 		}
 		const stored = await connectionFor(userId);
@@ -403,6 +948,17 @@ export async function getCopilotStatus(userId: string) {
 			lastError: stored?.lastError ?? null,
 		};
 	} catch (error) {
+		if (error instanceof CopilotRevokedError) {
+			const stored = await connectionFor(userId).catch(() => undefined);
+			return {
+				available: true,
+				connected: false,
+				type: null,
+				email: null,
+				planType: null,
+				lastError: stored?.lastError ?? null,
+			};
+		}
 		return {
 			available: false,
 			connected: false,
@@ -416,60 +972,150 @@ export async function getCopilotStatus(userId: string) {
 }
 
 export async function startCopilotLogin(userId: string) {
-	const client = await clientFor(userId);
-	const current = accountFrom(
-		await client.request("account/read", { refreshToken: false }),
-	);
-	if (current) return { alreadyConnected: true as const };
-	const result = (await client.request("account/login/start", {
-		type: "chatgptDeviceCode",
-	})) as Record<string, unknown>;
-	if (
-		result.type !== "chatgptDeviceCode" ||
-		typeof result.loginId !== "string" ||
-		typeof result.verificationUrl !== "string" ||
-		typeof result.userCode !== "string"
-	) {
-		throw new ORPCError("INTERNAL_SERVER_ERROR", {
-			message: "OpenAI-Login konnte nicht gestartet werden",
-		});
-	}
-	return {
-		alreadyConnected: false as const,
-		loginId: result.loginId,
-		verificationUrl: result.verificationUrl,
-		userCode: result.userCode,
-	};
+	return withCopilotOperationLock(userId, async () => {
+		const existing = await connectionFor(userId);
+		if (existing?.status === "pending") {
+			if (recentCopilotLoginLease(existing.lastAttemptedSyncAt)) {
+				if (
+					singletonUserId === userId &&
+					(singletonGeneration !== authGeneration(existing) ||
+						singletonCredentialVersion !==
+							authCredentialVersion(existing.encryptedSecret))
+				)
+					await dropLocalClient(userId);
+				const prompt = decodeCopilotLoginPrompt(existing.encryptedSecret);
+				if (prompt)
+					return {
+						alreadyConnected: false as const,
+						...prompt,
+					};
+				throw new ORPCError("CONFLICT", {
+					message:
+						"Der OpenAI-Login läuft bereits. Versuchen Sie es gleich erneut.",
+				});
+			}
+			clearCopilotLoginLease(userId);
+		}
+		if (existing?.status === "active" && existing.encryptedSecret) {
+			const currentClient = await clientFor(userId);
+			const current = accountFrom(
+				await currentClient.request("account/read", { refreshToken: false }),
+			);
+			if (current) return { alreadyConnected: true as const };
+		}
+		clearCopilotLoginLease(userId);
+		await db
+			.insert(externalConnections)
+			.values({
+				userId,
+				provider: PROVIDER,
+				providerConnectionId: null,
+				clientId: null,
+				status: "pending",
+				encryptedSecret: null,
+				copilotAuthGeneration: 1n,
+				lastAttemptedSyncAt: new Date(),
+				lastError: null,
+				updatedAt: new Date(),
+			})
+			.onConflictDoUpdate({
+				target: [externalConnections.userId, externalConnections.provider],
+				set: {
+					status: "pending",
+					encryptedSecret: null,
+					lastError: null,
+					lastAttemptedSyncAt: new Date(),
+					copilotAuthGeneration: sql`${externalConnections.copilotAuthGeneration} + 1`,
+					updatedAt: new Date(),
+				},
+			});
+		const client = await clientFor(userId);
+		const generation = singletonGeneration ?? 0n;
+		const result = (await client.request("account/login/start", {
+			type: "chatgptDeviceCode",
+		})) as Record<string, unknown>;
+		if (
+			result.type !== "chatgptDeviceCode" ||
+			typeof result.loginId !== "string" ||
+			typeof result.verificationUrl !== "string" ||
+			typeof result.userCode !== "string"
+		) {
+			throw new ORPCError("INTERNAL_SERVER_ERROR", {
+				message: "OpenAI-Login konnte nicht gestartet werden",
+			});
+		}
+		const prompt: CopilotLoginPrompt = {
+			loginId: result.loginId,
+			verificationUrl: result.verificationUrl,
+			userCode: result.userCode,
+		};
+		const encryptedPrompt = encryptSecret(JSON.stringify(prompt));
+		const [saved] = await db
+			.update(externalConnections)
+			.set({
+				encryptedSecret: encryptedPrompt,
+				lastAttemptedSyncAt: new Date(),
+				lastError: null,
+			})
+			.where(
+				and(
+					eq(externalConnections.userId, userId),
+					eq(externalConnections.provider, PROVIDER),
+					eq(externalConnections.status, "pending"),
+					eq(externalConnections.copilotAuthGeneration, generation),
+					isNull(externalConnections.encryptedSecret),
+				),
+			)
+			.returning({ id: externalConnections.id });
+		if (!saved) {
+			await client
+				.request("account/login/cancel", { loginId: prompt.loginId }, 1_000)
+				.catch(() => undefined);
+			throw new ORPCError("CONFLICT", {
+				message:
+					"Der OpenAI-Login wurde inzwischen ersetzt. Starten Sie ihn erneut.",
+			});
+		}
+		if (singletonUserId === userId && singletonGeneration === generation)
+			singletonCredentialVersion = authCredentialVersion(encryptedPrompt);
+		startCopilotLoginLease(userId, prompt, generation, encryptedPrompt, client);
+		return {
+			alreadyConnected: false as const,
+			...prompt,
+		};
+	});
 }
 
 export async function disconnectCopilot(userId: string) {
-	if (singleton) {
-		try {
-			const client = await singleton;
-			await client.request("account/logout", {}).catch(() => undefined);
-			client.stop();
-		} catch {
-			// A dead child still needs its persisted authentication removed.
-		}
-	}
-	singleton = null;
-	singletonUserId = null;
-	loadedThreadId = null;
-	activeTurns.delete(userId);
-	await rm(STATE_DIR, { recursive: true, force: true });
 	await db
-		.update(externalConnections)
-		.set({ status: "disconnected", encryptedSecret: null, lastError: null })
-		.where(
-			and(
-				eq(externalConnections.userId, userId),
-				eq(externalConnections.provider, PROVIDER),
-			),
-		);
+		.insert(externalConnections)
+		.values({
+			userId,
+			provider: PROVIDER,
+			providerConnectionId: null,
+			clientId: null,
+			status: "disconnected",
+			encryptedSecret: null,
+			copilotAuthGeneration: 1n,
+			lastError: null,
+			updatedAt: new Date(),
+		})
+		.onConflictDoUpdate({
+			target: [externalConnections.userId, externalConnections.provider],
+			set: {
+				status: "disconnected",
+				encryptedSecret: null,
+				lastError: null,
+				copilotAuthGeneration: sql`${externalConnections.copilotAuthGeneration} + 1`,
+				updatedAt: new Date(),
+			},
+		});
+	clearCopilotLoginLease(userId);
+	await dropLocalClient(userId);
 	await db.delete(copilotThreads).where(eq(copilotThreads.userId, userId));
 }
 
-export async function resetCopilotChat(userId: string) {
+async function resetCopilotChatLocked(userId: string) {
 	const row = await db.query.copilotThreads.findFirst({
 		where: eq(copilotThreads.userId, userId),
 	});
@@ -494,6 +1140,10 @@ export async function resetCopilotChat(userId: string) {
 	activeTurns.delete(userId);
 	if (loadedThreadId === row?.threadId) loadedThreadId = null;
 	await db.delete(copilotThreads).where(eq(copilotThreads.userId, userId));
+}
+
+export async function resetCopilotChat(userId: string) {
+	return withCopilotControlLock(userId, () => resetCopilotChatLocked(userId));
 }
 
 type CopilotHistory = { role: "user" | "assistant"; content: string }[];
@@ -1131,23 +1781,11 @@ export function buildCopilotPrompt(
 	return `BISHERIGER CHAT:\n${transcript || "Noch kein Verlauf."}\n\nAKTUELLER FORTUNA-SNAPSHOT:\n${JSON.stringify(context)}\n\nFRAGE:\n${question}`;
 }
 
-const contextCache = new Map<string, unknown>();
-
-async function focusedFinancialContext(
+export async function focusedFinancialContext(
 	userId: string,
 	focuses: CopilotFocus[],
 ) {
-	const revision = dataRevision(userId);
 	const normalized = Array.from(new Set(focuses)).sort();
-	const cacheKey = `${userId}:${revision}:${normalized.join(",")}`;
-	const cached = contextCache.get(cacheKey);
-	if (cached) return cached;
-	for (const key of contextCache.keys())
-		if (
-			key.startsWith(`${userId}:`) &&
-			!key.startsWith(`${userId}:${revision}:`)
-		)
-			contextCache.delete(key);
 
 	const [
 		netWorth,
@@ -1165,7 +1803,6 @@ async function focusedFinancialContext(
 		hrKoernerSvc.listObservations(userId),
 	]);
 	const context: Record<string, unknown> = {
-		revision,
 		asOf: netWorth.date,
 		baseCurrency: netWorth.baseCurrency,
 		netWorth: {
@@ -1270,7 +1907,6 @@ async function focusedFinancialContext(
 		}),
 	);
 	const safe = withoutAccountIdentifiers(context);
-	contextCache.set(cacheKey, safe);
 	return safe;
 }
 
@@ -1584,7 +2220,7 @@ async function runCopilotTurn(
 	});
 }
 
-export async function streamCopilot(
+async function streamCopilotWithLock(
 	userId: string,
 	input: {
 		question: string;
@@ -1628,6 +2264,8 @@ export async function streamCopilot(
 	};
 	try {
 		const client = await clientFor(userId);
+		const authGenerationAtStart = singletonGeneration ?? 0n;
+		const authCredentialVersionAtStart = singletonCredentialVersion;
 		logger.info("Fortuna Copilot App Server ready", {
 			event: "copilot.stream.client_ready",
 			traceId,
@@ -1689,8 +2327,23 @@ export async function streamCopilot(
 			.request("account/read", { refreshToken: true })
 			.then(accountFrom)
 			.then((account) =>
-				account ? persistAuthentication(userId, account) : undefined,
+				account
+					? persistAuthentication(
+							userId,
+							account,
+							authGenerationAtStart,
+							authCredentialVersionAtStart,
+						)
+					: undefined,
 			)
+			.then((persisted) => {
+				if (persisted === false)
+					return dropLocalClient(
+						userId,
+						authGenerationAtStart,
+						authCredentialVersionAtStart,
+					);
+			})
 			.catch((error) =>
 				// The refresh talks to the token endpoint; its message can carry
 				// provider detail, so only the class is logged.
@@ -1724,6 +2377,31 @@ export async function streamCopilot(
 	}
 }
 
+export async function streamCopilot(
+	userId: string,
+	input: {
+		question: string;
+		history: CopilotHistory;
+		userName: string;
+		attachmentIds: string[];
+	},
+	onEvent: (event: CopilotStreamEvent) => void,
+	signal?: AbortSignal,
+	traceId?: string,
+) {
+	try {
+		return await withCopilotOperationLock(userId, () =>
+			streamCopilotWithLock(userId, input, onEvent, signal, traceId),
+		);
+	} catch (error) {
+		if (error instanceof CopilotOperationBusyError)
+			throw new ORPCError("CONFLICT", {
+				message: "Herr Körner bearbeitet bereits eine Anfrage",
+			});
+		throw error;
+	}
+}
+
 /**
  * A turn on an isolated, tool-free thread that can be continued.
  *
@@ -1733,7 +2411,7 @@ export async function streamCopilot(
  * model then still has what it asked and what it was told, which is the whole
  * point of asking a question in the first place.
  */
-export async function isolatedTurn(
+async function isolatedTurnWithLock(
 	userId: string,
 	input: {
 		/** Omit to start a new conversation. */
@@ -1861,4 +2539,26 @@ export async function isolatedTurn(
 			});
 	});
 	return { threadId: thread, text };
+}
+
+export async function isolatedTurn(
+	userId: string,
+	input: {
+		threadId?: string | null;
+		instructions: string;
+		prompt: string;
+		purpose?: string;
+	},
+): Promise<{ threadId: string; text: string }> {
+	try {
+		return await withCopilotOperationLock(userId, () =>
+			isolatedTurnWithLock(userId, input),
+		);
+	} catch (error) {
+		if (error instanceof CopilotOperationBusyError)
+			throw new ORPCError("CONFLICT", {
+				message: "Herr Körner bearbeitet bereits eine Anfrage",
+			});
+		throw error;
+	}
 }
