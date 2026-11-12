@@ -16,6 +16,11 @@ d("schema readiness against PostgreSQL", () => {
 		).toBe(true);
 		expect(
 			expectedDatabaseColumns.some(
+				(column) => column.table_name === "rate_limit",
+			),
+		).toBe(true);
+		expect(
+			expectedDatabaseColumns.some(
 				(column) =>
 					column.table_name === "financial_observations" &&
 					column.column_name === "read_at",
