@@ -11,14 +11,17 @@ d("database-backed authentication limits", () => {
 	it("limits repeated sign-ins using shared database counters", async () => {
 		const fakeIp = `192.0.2.${Math.floor(Math.random() * 200) + 1}`;
 		const email = `${randomUUID()}@example.invalid`;
+		const origin = new URL(
+			process.env.BETTER_AUTH_URL ?? "http://localhost:3000",
+		).origin;
 		const statuses: number[] = [];
 		for (let attempt = 0; attempt < 9; attempt++) {
 			const response = await auth.handler(
-				new Request("http://localhost:3000/api/auth/sign-in/email", {
+				new Request(`${origin}/api/auth/sign-in/email`, {
 					method: "POST",
 					headers: {
 						"content-type": "application/json",
-						origin: "http://localhost:3000",
+						origin,
 						"x-forwarded-for": fakeIp,
 					},
 					body: JSON.stringify({ email, password: "not-a-real-password" }),
