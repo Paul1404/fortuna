@@ -108,11 +108,9 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   due again after five minutes; one whose bank rejects them falls back to six
   hours so four reads cover the day. The service coalesces concurrent manual
   and automatic syncs in-process and holds a PostgreSQL session advisory lock
-  per connection across sync, callback and disconnect/remove operations. Each
-  lock holder increments the connection's fence epoch; every material bank
-  write checks and row-locks that epoch in its transaction, so a stale holder
-  cannot commit after a newer epoch. Lock loss also aborts provider HTTP reads.
-  It never uses expired consent. After a failed sync,
+  per connection across sync, callback and disconnect/remove operations. Bank
+  writes check the connection's fence epoch in their transaction, and lock loss
+  aborts provider HTTP reads. Expired consent is not used. After a failed sync,
   automatic retries wait an hour; the manual Abgleichen action remains
   available immediately. Never log the PSU address or agent, a provider
   response body or credentials — only a safe error class and HTTP status.
@@ -569,8 +567,8 @@ Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
   `auth.json` encrypted in `external_connections`; during login that row holds
   the encrypted device prompt and a worker lease instead. Generation and
   ciphertext checks prevent late workers from restoring revoked credentials.
-  Never return or log raw tokens. Turns run in the empty Copilot workspace with restricted read-only
-  access and receive only a bounded financial snapshot without IBANs. Dynamic
+  Never return or log raw tokens. Turns run in the empty Copilot workspace
+  with restricted read-only access and receive only a bounded financial snapshot without IBANs. Dynamic
   tools may create and update Fortuna domain records, but must validate with the
   shared Valibot schemas, stay inside the session-only Copilot mutation, expose
   no delete or external-payment operations, and treat imported text as untrusted

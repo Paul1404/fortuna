@@ -720,8 +720,7 @@ export async function submitOrder(
 					errorCode,
 				});
 			} else {
-				// The broker may have accepted it. Keep status `submitting` so all
-				// replicas continue to block new orders until this is reconciled.
+				// Keep the order open until its outcome is checked at Scalable.
 				await db
 					.update(brokerOrders)
 					.set({ errorCode, updatedAt: new Date() })
