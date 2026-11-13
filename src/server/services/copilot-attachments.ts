@@ -308,8 +308,7 @@ export async function storeCopilotAttachments(
 }
 
 /**
- * Local temporary uploads are swept after a crash. Shared objects are listed
- * by their private prefix and expired metadata removes the associated payload.
+ * Remove expired local uploads and shared attachment objects.
  */
 async function sweepExpiredUploads(
 	mode: AttachmentStorageMode,
@@ -343,8 +342,7 @@ async function sweepExpiredUploads(
 		for (const [id, parts] of byId) {
 			result.checked += 1;
 			if (!parts.has("metadata")) {
-				// Upload writes content before metadata. Only collect old orphaned
-				// payloads after a five-minute grace beyond the normal TTL.
+				// Allow five extra minutes for uploads to write metadata.
 				const lastModified = parts.get("content")?.getTime();
 				if (lastModified === undefined || !Number.isFinite(lastModified)) {
 					result.skipped += 1;
@@ -374,7 +372,7 @@ async function sweepExpiredUploads(
 					result.deleted += 1;
 				} else result.deferred += 1;
 			} catch {
-				// A transient GET, decryption, or parse failure never authorizes deletion.
+				// Leave unreadable metadata for the next sweep.
 				result.skipped += 1;
 			}
 		}
@@ -400,8 +398,7 @@ async function sweepExpiredUploads(
 			) as { createdAt?: number };
 			createdAt = raw.createdAt;
 		} catch {
-			// A concurrent upload writes its content before metadata. Use directory
-			// age and a grace period before removing a directory with no metadata.
+			// Allow time for an upload to write its metadata.
 		}
 		if (typeof createdAt === "number" && Date.now() - createdAt <= EXPIRES_MS) {
 			result.deferred += 1;

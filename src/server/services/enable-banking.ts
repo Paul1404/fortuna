@@ -711,9 +711,7 @@ export async function completeEnableBankingConnection(
 		connection.userId,
 		connection.id,
 		async (fence) => {
-			// A callback can wait behind an earlier callback after its initial read.
-			// Revalidate the one-time state after taking the distributed lock so a
-			// stale snapshot cannot exchange the same authorization code twice.
+			// Recheck the state after acquiring the lock.
 			const current = await db.query.bankConnections.findFirst({
 				where: and(
 					eq(bankConnections.id, connection.id),

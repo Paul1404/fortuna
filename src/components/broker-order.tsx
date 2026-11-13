@@ -487,8 +487,8 @@ export function OrderLogCard() {
 	) => {
 		const message =
 			outcome === "found"
-				? "Sie haben die Order bei Scalable gefunden. Fortuna vermerkt Ihre Aussage, prüft den Brokerstatus aber nicht unabhängig. Fortfahren?"
-				: "Sie haben die Order bei Scalable nicht gefunden. Fortuna vermerkt Ihre Aussage und sendet sie nicht erneut. Sie können später eine neue Vorschau anfordern. Fortfahren?";
+				? "Order bei Scalable gefunden? Fortuna speichert Ihre Bestätigung."
+				: "Order bei Scalable nicht gefunden? Fortuna speichert Ihre Bestätigung. Sie können danach eine neue Vorschau anfordern.";
 		if (!window.confirm(message)) return;
 		resolveUnknown.mutate({ orderId, outcome, confirmed: true });
 	};
@@ -524,9 +524,9 @@ export function OrderLogCard() {
 								{order.status === "submitting" ? (
 									<div className="mt-1 space-y-1">
 										<p className="break-words text-xs text-text-secondary">
-											Scalable könnte angenommen haben. Prüfen Sie dort zuerst
-											und gleichen Sie Ihre Feststellung hier ab. Es wird nichts
-											erneut gesendet.
+											Scalable könnte die Order angenommen haben. Prüfen Sie
+											dort zuerst und gleichen Sie Ihre Feststellung hier ab. Es
+											wird nichts erneut gesendet.
 										</p>
 										<div className="flex flex-wrap gap-2">
 											<Button

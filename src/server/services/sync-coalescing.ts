@@ -20,9 +20,7 @@ export class BankSyncFenceLostError extends Error {
 }
 
 /**
- * Check the fencing epoch and hold the connection row for the whole write
- * transaction. The next holder's epoch increment must wait for this transaction
- * to finish; after it commits, stale holders cannot begin another write.
+ * Hold the connection row while writing so a newer epoch fences stale workers.
  */
 export async function withBankSyncFenceTransaction<T>(
 	fence: BankSyncFence,
@@ -98,10 +96,8 @@ export function coalesceSync<T>(
 	return task;
 }
 /**
- * Cross-process exclusion for a bank connection. The session lock lives on a
- * dedicated PostgreSQL connection for the complete operation, including bank
- * HTTP calls. PostgreSQL drops it if the process or socket dies. Never use a
- * transaction lock here: a bank read can outlive a transaction timeout.
+ * Hold a session lock across the bank read. A transaction lock can expire
+ * before the HTTP call finishes.
  */
 export async function withBankConnectionLock<T>(
 	userId: string,
@@ -134,8 +130,7 @@ export async function withBankConnectionLock<T>(
 			.update(bankConnections)
 			.set({
 				syncEpoch: sql`${bankConnections.syncEpoch} + 1`,
-				// Taking a coordination lock is not a domain update and must not
-				// reset the one-hour retry delay for an errored connection.
+				// Preserve the retry delay when acquiring the lock.
 				updatedAt: sql`${bankConnections.updatedAt}`,
 			})
 			.where(
