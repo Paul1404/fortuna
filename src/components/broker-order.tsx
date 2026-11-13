@@ -461,17 +461,37 @@ function Disclosure({
 
 const STATUS_LABELS: Record<string, string> = {
 	previewed: "Vorschau",
-	submitting: "Wird übermittelt",
+	submitting: "Ausgang offen",
 	submitted: "Übermittelt",
 	failed: "Fehlgeschlagen",
 	expired: "Verworfen",
+	owner_asserted_submitted: "Von Ihnen bei Scalable gefunden",
+	owner_asserted_not_submitted: "Von Ihnen bei Scalable nicht gefunden",
 };
 
 /** Every order Fortuna previewed or placed, newest first. */
 export function OrderLogCard() {
 	const f = useFormat();
+	const invalidate = useInvalidateAll();
 	const { data } = useQuery(orpc.brokerOrders.list.queryOptions());
+	const resolveUnknown = useMutation(
+		orpc.brokerOrders.resolveUnknown.mutationOptions({
+			onSuccess: invalidate,
+			onError: reportError,
+		}),
+	);
 	if (!data?.length) return null;
+	const recordOwnerCheck = (
+		orderId: string,
+		outcome: "found" | "not_found",
+	) => {
+		const message =
+			outcome === "found"
+				? "Sie haben die Order bei Scalable gefunden. Fortuna vermerkt Ihre Aussage, prüft den Brokerstatus aber nicht unabhängig. Fortfahren?"
+				: "Sie haben die Order bei Scalable nicht gefunden. Fortuna vermerkt Ihre Aussage und sendet sie nicht erneut. Sie können später eine neue Vorschau anfordern. Fortfahren?";
+		if (!window.confirm(message)) return;
+		resolveUnknown.mutate({ orderId, outcome, confirmed: true });
+	};
 	return (
 		<Card>
 			<CardHeader
@@ -492,11 +512,52 @@ export function OrderLogCard() {
 								</p>
 								<p className="amount text-xs text-text-muted">
 									{order.isin} · {f.dateTime(order.createdAt)}
-									{order.errorCode ? ` · ${order.errorCode}` : ""}
+									{order.errorCode && order.errorCode !== "SUBMISSION_UNKNOWN"
+										? ` · ${order.errorCode}`
+										: ""}
 								</p>
 								{order.sellReason ? (
 									<p className="mt-0.5 break-words text-xs text-text-secondary">
 										Warum jetzt: „{order.sellReason}“
+									</p>
+								) : null}
+								{order.status === "submitting" ? (
+									<div className="mt-1 space-y-1">
+										<p className="break-words text-xs text-text-secondary">
+											Scalable könnte angenommen haben. Prüfen Sie dort zuerst
+											und gleichen Sie Ihre Feststellung hier ab. Es wird nichts
+											erneut gesendet.
+										</p>
+										<div className="flex flex-wrap gap-2">
+											<Button
+												type="button"
+												variant="outline"
+												size="sm"
+												disabled={resolveUnknown.isPending}
+												onClick={() => recordOwnerCheck(order.id, "found")}
+											>
+												Bei Scalable gefunden
+											</Button>
+											<Button
+												type="button"
+												variant="outline"
+												size="sm"
+												disabled={resolveUnknown.isPending}
+												onClick={() => recordOwnerCheck(order.id, "not_found")}
+											>
+												Bei Scalable nicht gefunden
+											</Button>
+										</div>
+									</div>
+								) : order.status === "owner_asserted_submitted" ? (
+									<p className="mt-0.5 break-words text-xs text-text-secondary">
+										Sie haben die Order bei Scalable gefunden. Fortuna hat den
+										Brokerstatus nicht unabhängig geprüft.
+									</p>
+								) : order.status === "owner_asserted_not_submitted" ? (
+									<p className="mt-0.5 break-words text-xs text-text-secondary">
+										Sie haben die Order bei Scalable nicht gefunden. Fortuna hat
+										sie nicht erneut abgesendet.
 									</p>
 								) : null}
 							</div>

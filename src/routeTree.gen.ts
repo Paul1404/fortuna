@@ -28,6 +28,7 @@ import { Route as AppRecapRouteImport } from './routes/_app/recap'
 import { Route as AppSettingsRouteImport } from './routes/_app/settings'
 import { Route as AppTransactionsRouteImport } from './routes/_app/transactions'
 import { Route as ApiHealthRouteImport } from './routes/api/health'
+import { Route as ApiLiveRouteImport } from './routes/api/live'
 import { Route as ApiMcpRouteImport } from './routes/api/mcp'
 import { Route as AppAccountsIndexRouteImport } from './routes/_app/accounts/index'
 import { Route as AppAccountsIdRouteImport } from './routes/_app/accounts/$id'
@@ -146,6 +147,11 @@ const AppTransactionsRoute = AppTransactionsRouteImport.update({
 const ApiHealthRoute = ApiHealthRouteImport.update({
   id: '/api/health',
   path: '/api/health',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiLiveRoute = ApiLiveRouteImport.update({
+  id: '/api/live',
+  path: '/api/live',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiMcpRoute = ApiMcpRouteImport.update({
@@ -296,6 +302,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/api/health': typeof ApiHealthRoute
+  '/api/live': typeof ApiLiveRoute
   '/api/mcp': typeof ApiMcpRoute
   '/accounts/$id': typeof AppAccountsIdRoute
   '/assets/$id': typeof AppAssetsIdRoute
@@ -340,6 +347,7 @@ export interface FileRoutesByTo {
   '/settings': typeof AppSettingsRoute
   '/transactions': typeof AppTransactionsRoute
   '/api/health': typeof ApiHealthRoute
+  '/api/live': typeof ApiLiveRoute
   '/api/mcp': typeof ApiMcpRoute
   '/': typeof AppIndexRoute
   '/accounts/$id': typeof AppAccountsIdRoute
@@ -387,6 +395,7 @@ export interface FileRoutesById {
   '/_app/settings': typeof AppSettingsRoute
   '/_app/transactions': typeof AppTransactionsRoute
   '/api/health': typeof ApiHealthRoute
+  '/api/live': typeof ApiLiveRoute
   '/api/mcp': typeof ApiMcpRoute
   '/_app/': typeof AppIndexRoute
   '/_app/accounts/$id': typeof AppAccountsIdRoute
@@ -435,6 +444,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/transactions'
     | '/api/health'
+    | '/api/live'
     | '/api/mcp'
     | '/accounts/$id'
     | '/assets/$id'
@@ -479,6 +489,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/transactions'
     | '/api/health'
+    | '/api/live'
     | '/api/mcp'
     | '/'
     | '/accounts/$id'
@@ -525,6 +536,7 @@ export interface FileRouteTypes {
     | '/_app/settings'
     | '/_app/transactions'
     | '/api/health'
+    | '/api/live'
     | '/api/mcp'
     | '/_app/'
     | '/_app/accounts/$id'
@@ -559,6 +571,7 @@ export interface RootRouteChildren {
   PrivacyRoute: typeof PrivacyRoute
   TermsRoute: typeof TermsRoute
   ApiHealthRoute: typeof ApiHealthRoute
+  ApiLiveRoute: typeof ApiLiveRoute
   ApiMcpRoute: typeof ApiMcpRoute
   ApiAuthSplatRoute: typeof ApiAuthSplatRoute
   ApiCopilotAttachmentsRoute: typeof ApiCopilotAttachmentsRoute
@@ -705,6 +718,13 @@ declare module '@tanstack/react-router' {
       path: '/api/health'
       fullPath: '/api/health'
       preLoaderRoute: typeof ApiHealthRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/live': {
+      id: '/api/live'
+      path: '/api/live'
+      fullPath: '/api/live'
+      preLoaderRoute: typeof ApiLiveRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/mcp': {
@@ -955,6 +975,7 @@ const rootRouteChildren: RootRouteChildren = {
   PrivacyRoute: PrivacyRoute,
   TermsRoute: TermsRoute,
   ApiHealthRoute: ApiHealthRoute,
+  ApiLiveRoute: ApiLiveRoute,
   ApiMcpRoute: ApiMcpRoute,
   ApiAuthSplatRoute: ApiAuthSplatRoute,
   ApiCopilotAttachmentsRoute: ApiCopilotAttachmentsRoute,

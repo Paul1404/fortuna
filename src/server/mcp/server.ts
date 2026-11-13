@@ -38,13 +38,15 @@ export async function handleMcpRequest(request: Request): Promise<Response> {
 				{ status: 503 },
 			);
 		}
-		const ipRetry = enforceMcpRateLimit(
+		const ipRetry = await enforceMcpRateLimit(
 			`ip:${request.headers.get("x-forwarded-for")?.split(",").pop()?.trim() ?? "local"}`,
 		);
 		if (ipRetry) return mcpRateLimitedResponse(ipRetry);
 		const auth = await authenticateMcpRequest(request);
 		if (!auth) return mcpUnauthorizedResponse();
-		const tokenRetry = enforceMcpRateLimit(`token:${auth.tokenFingerprint}`);
+		const tokenRetry = await enforceMcpRateLimit(
+			`token:${auth.tokenFingerprint}`,
+		);
 		if (tokenRetry) return mcpRateLimitedResponse(tokenRetry);
 		return await serve(request, auth);
 	} catch (err) {

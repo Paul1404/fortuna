@@ -9,6 +9,7 @@ import {
 	isNull,
 	lte,
 	min,
+	or,
 } from "drizzle-orm";
 import { splitTotal, type TargetSplit } from "@/domain/capital-advice";
 import {
@@ -447,24 +448,37 @@ export function reviewDue(userId: string, force = false) {
 	return promise;
 }
 
-async function performReview(userId: string, force: boolean) {
-	const now = new Date();
-	const run = await db.query.financialReviewRuns.findFirst({
-		where: eq(financialReviewRuns.userId, userId),
-	});
-	if (
-		!force &&
-		run?.lastAttemptedAt &&
-		now.getTime() - run.lastAttemptedAt.getTime() < 6 * 60 * 60 * 1000
-	)
-		return { attempted: false, created: 0 };
-	await db
+export async function claimReviewRun(
+	userId: string,
+	force: boolean,
+	now: Date,
+) {
+	const claimed = await db
 		.insert(financialReviewRuns)
 		.values({ userId, lastAttemptedAt: now })
 		.onConflictDoUpdate({
 			target: financialReviewRuns.userId,
 			set: { lastAttemptedAt: now },
-		});
+			...(force
+				? {}
+				: {
+						setWhere: or(
+							isNull(financialReviewRuns.lastAttemptedAt),
+							lte(
+								financialReviewRuns.lastAttemptedAt,
+								new Date(now.getTime() - 6 * 60 * 60 * 1000),
+							),
+						),
+					}),
+		})
+		.returning({ userId: financialReviewRuns.userId });
+	return claimed.length > 0;
+}
+
+async function performReview(userId: string, force: boolean) {
+	const now = new Date();
+	if (!(await claimReviewRun(userId, force, now)))
+		return { attempted: false, created: 0 };
 	try {
 		const today = todayIso(now);
 		const [profile, settings, worth, recurring, txRows] = await Promise.all([

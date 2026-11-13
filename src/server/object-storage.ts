@@ -2,6 +2,7 @@ import {
 	DeleteObjectCommand,
 	GetObjectCommand,
 	HeadBucketCommand,
+	ListObjectsV2Command,
 	PutObjectCommand,
 	S3Client,
 } from "@aws-sdk/client-s3";
@@ -122,4 +123,33 @@ export async function deletePrivateObject(key: string) {
 	await target.client.send(
 		new DeleteObjectCommand({ Bucket: target.config.bucket, Key: key }),
 	);
+}
+
+/** List keys under a private prefix, following S3-compatible pagination. */
+export async function listPrivateObjects(
+	prefix: string,
+): Promise<{ key: string; lastModified: Date | null }[]> {
+	const target = storage();
+	if (!target) throw new Error("Objektspeicher ist nicht eingerichtet");
+	const objects: { key: string; lastModified: Date | null }[] = [];
+	let continuationToken: string | undefined;
+	do {
+		const result = await target.client.send(
+			new ListObjectsV2Command({
+				Bucket: target.config.bucket,
+				Prefix: prefix,
+				ContinuationToken: continuationToken,
+			}),
+		);
+		for (const item of result.Contents ?? [])
+			if (item.Key)
+				objects.push({
+					key: item.Key,
+					lastModified: item.LastModified ?? null,
+				});
+		continuationToken = result.IsTruncated
+			? result.NextContinuationToken
+			: undefined;
+	} while (continuationToken);
+	return objects;
 }

@@ -11,6 +11,8 @@ const schema = { ...appSchema, ...authSchema };
 declare global {
 	// eslint-disable-next-line no-var
 	var __fortunaPool: Pool | undefined;
+	// eslint-disable-next-line no-var
+	var __fortunaBankSyncLockPool: Pool | undefined;
 }
 
 function timeoutFromEnv(name: string, fallback: number): number {
@@ -20,14 +22,17 @@ function timeoutFromEnv(name: string, fallback: number): number {
 		: fallback;
 }
 
-function createPool(): Pool {
+function createPool(
+	options: { max?: number; allowExitOnIdle?: boolean } = {},
+): Pool {
 	const connectionString = process.env.DATABASE_URL;
 	if (!connectionString) {
 		throw new Error("DATABASE_URL is not set");
 	}
 	return new Pool({
 		connectionString,
-		max: 10,
+		max: options.max ?? 10,
+		allowExitOnIdle: options.allowExitOnIdle ?? false,
 		idleTimeoutMillis: 20_000,
 		connectionTimeoutMillis: timeoutFromEnv(
 			"DATABASE_CONNECTION_TIMEOUT_MS",
@@ -39,12 +44,16 @@ function createPool(): Pool {
 }
 
 const pool = globalThis.__fortunaPool ?? createPool();
+const bankSyncLockPool =
+	globalThis.__fortunaBankSyncLockPool ??
+	createPool({ max: 2, allowExitOnIdle: true });
 if (process.env.NODE_ENV !== "production") {
 	globalThis.__fortunaPool = pool;
+	globalThis.__fortunaBankSyncLockPool = bankSyncLockPool;
 }
 
 export const db = drizzle(pool, { schema });
-export { pool, schema };
+export { bankSyncLockPool, pool, schema };
 
 export type Database = typeof db;
 export type DbOrTx =

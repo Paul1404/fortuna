@@ -1,12 +1,27 @@
 import { relations } from "drizzle-orm";
 import {
+	bigint,
 	boolean,
 	index,
+	integer,
 	pgTable,
 	text,
 	timestamp,
 	uniqueIndex,
 } from "drizzle-orm/pg-core";
+
+export const rateLimit = pgTable("rate_limit", {
+	id: text("id").primaryKey(),
+	key: text("key").notNull().unique(),
+	count: integer("count").notNull(),
+	lastRequest: bigint("last_request", { mode: "number" }).notNull(),
+});
+
+export const mcpRateLimit = pgTable("mcp_rate_limit", {
+	keyHash: text("key_hash").primaryKey(),
+	count: integer("count").notNull(),
+	resetAt: bigint("reset_at", { mode: "number" }).notNull(),
+});
 
 // better-auth core tables. Column names follow better-auth's defaults so the
 // Drizzle adapter maps them without extra configuration.

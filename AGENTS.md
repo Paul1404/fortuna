@@ -1,5 +1,7 @@
 # Repository guidance
 
+> Production runs on Vertex RKE2 via Fleet, with PostgreSQL on Longhorn and private S3-compatible document storage in Garage. The source image is published to GHCR after main CI and security scanning. Railway-specific material is historical.
+
 `AGENTS.md` is the canonical instruction file for Fortuna. Claude Code loads it
 through `CLAUDE.md`. Read it before changing code.
 
@@ -20,7 +22,7 @@ full preview (see "Orders at Scalable").
 
 Stack in one line: TanStack Start (Vite 8, Nitro) + React 19, oRPC procedures
 validated with Valibot, Drizzle on PostgreSQL, better-auth, Tailwind v4, Bun,
-Biome, Vitest. Deployed on Railway via the Dockerfile.
+Biome, Vitest. Deployed on Vertex via the Dockerfile and Fleet.
 
 ## Layout you actually need
 
@@ -105,7 +107,12 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   limit on background access. A connection whose bank accepts those headers is
   due again after five minutes; one whose bank rejects them falls back to six
   hours so four reads cover the day. The service coalesces concurrent manual
-  and automatic syncs and never uses expired consent. After a failed sync,
+  and automatic syncs in-process and holds a PostgreSQL session advisory lock
+  per connection across sync, callback and disconnect/remove operations. Each
+  lock holder increments the connection's fence epoch; every material bank
+  write checks and row-locks that epoch in its transaction, so a stale holder
+  cannot commit after a newer epoch. Lock loss also aborts provider HTTP reads.
+  It never uses expired consent. After a failed sync,
   automatic retries wait an hour; the manual Abgleichen action remains
   available immediately. Never log the PSU address or agent, a provider
   response body or credentials — only a safe error class and HTTP status.
@@ -396,6 +403,11 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
     submission triggers a read-back sync. The procedures are `mutation` /
     `sessionRead` only and must never enter `COPILOT_TOOLS` or
     `MCP_WRITE_TOOL_NAMES`.
+    The encrypted preview includes the CLI v1.2.0 confirmation file, restored
+    into the isolated workspace for submission. A result after the CLI starts
+    may be ambiguous: block further orders until the owner checks Scalable and
+    records an assertion. Never automatically retry or treat that assertion as
+    provider confirmation. Guard late result writes against replacing it.
   - Agents building on this test only against a simulated CLI
     (`tests/integration/broker-orders.test.ts`) and never place a real order.
   - A sale requires a reason ("Warum jetzt?", the owner's decision of
@@ -492,14 +504,10 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
 
 ## Deployment
 
-- Railway project `fortuna`, service `fortuna-app`, defined in
-  `.railway/railway.ts` (TypeScript IaC; `railway.toml` config-as-code is
-  deprecated and must not come back). `railway config plan` before any
-  `railway config apply`; never apply from an agent session without the
-  user reading the plan.
-- Every push to `main` waits for successful GitHub workflows before production deployment;
-  prove changes locally first. The pre-deploy migrator aborts the release on
-  failure.
+- Production runs on Vertex RKE2 through Fleet. Verified main-branch GHCR
+  images are promoted by digest. The migration init container runs before the
+  app starts; PostgreSQL uses Longhorn and documents use a private Garage bucket.
+- Railway IaC under `.railway/` is historical. Do not operate it as production.
 - `/api/health` is deployment readiness, not an authenticated workflow test or
   continuous monitoring. It checks the table/column contract derived from both
   Drizzle schemas without reading owner records. Configured object storage must
@@ -511,7 +519,10 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   `no-store`. Never call bank, broker or model services from a health probe.
   CI exercises the built server and all authenticated routes against disposable
   PostgreSQL; those browser checks complement readiness, not replace it.
-- Secrets are `preserve()`d in IaC and live only in Railway.
+- `/api/live` is dependency-independent liveness. Better Auth and MCP rate
+  limits use PostgreSQL; MCP stores hashed identifiers. The migrator holds a
+  PostgreSQL advisory lock while migrations, repairs and owner provisioning run.
+- Runtime secrets are provisioned separately from Git; never print them.
 - User-uploaded provider application keys live in `provider_credentials`, are
   validated server-side, encrypted through `src/server/crypto.ts`, and are
   never returned, logged or exposed through MCP. Keep uploads on a bounded,
@@ -554,9 +565,11 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   Kataster cost and margin figures are an operational view only and must never
   contribute to accounts, transactions or net worth.
 - Fortuna Copilot runs the pinned `@openai/codex` App Server in a scrubbed child
-  environment and authenticates with ChatGPT's device-code flow. Persist only
-  its encrypted `auth.json` in `external_connections`; never return or log raw
-  tokens. Turns run in the empty Copilot workspace with restricted read-only
+  environment and authenticates with ChatGPT's device-code flow. Store its
+  `auth.json` encrypted in `external_connections`; during login that row holds
+  the encrypted device prompt and a worker lease instead. Generation and
+  ciphertext checks prevent late workers from restoring revoked credentials.
+  Never return or log raw tokens. Turns run in the empty Copilot workspace with restricted read-only
   access and receive only a bounded financial snapshot without IBANs. Dynamic
   tools may create and update Fortuna domain records, but must validate with the
   shared Valibot schemas, stay inside the session-only Copilot mutation, expose
@@ -573,10 +586,10 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   resumed thread cannot swap its tools, so old threads would keep offering
   the removed ones.
 - Build a compact base snapshot and add only the domain context selected from
-  the current question. Cache snapshots against the in-process user data
-  revision and advance that revision after every session mutation or Copilot
-  tool write. Keep browser history as recovery context for a new server thread,
-  not as repeated context for every resumed turn.
+  the current question. Recompute it for each turn so changes on another
+  replica are visible. Keep browser history as recovery context for a new server
+  thread, not as repeated context for every resumed turn. A thread that cannot
+  resume on another pod starts fresh with the bounded browser history.
 - The Copilot persona is Herr Konrad Körner, a factual, precise accountant
   who writes plain standard German. No dialect, regional colour or irony (the
   owner's decision of 01.10.2026); both prompts say so and
@@ -589,11 +602,13 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   model output through the shared safe GFM Markdown component; do not enable raw
   HTML. Keep retry from duplicating the user's visible message and keep chat
   visible chat history browser-local.
-- Copilot attachments use the bounded same-origin multipart route. Store them
-  only under the private temporary upload root, scope metadata to `userId`,
-  never log names or contents, and delete successful uploads or expire them
-  after 30 minutes. Images use App Server `localImage`; text is length-limited;
-  PDFs use Poppler text extraction with at most four rendered scan pages.
+- Copilot attachments use the bounded same-origin multipart route. Store shared
+  content and owner-scoped metadata encrypted in private object storage; local
+  staging is temporary. Never log names or contents. Delete successful uploads
+  or expire them after 30 minutes; the Fleet cleanup job runs
+  `scripts/cleanup-copilot-attachments.ts` for expired shared objects. Images
+  use App Server `localImage`; text is length-limited; PDFs use Poppler text
+  extraction with at most four rendered scan pages.
 - Durable Copilot memories hold only user-confirmed preferences, naming
   conventions and domain rules. Use a stable key so corrections replace old
   knowledge. Do not duplicate balances, transactions, contracts or credentials
@@ -807,7 +822,8 @@ Biome, Vitest. Deployed on Railway via the Dockerfile.
   is booked. A provider pending row is deleted only under
   `unreportedPendingIds` (`src/domain/pending.ts`), and the read reaches back
   to the oldest such row. Every bank sync, including the callback's first
-  read, goes through `coalesceSync`.
+  read, goes through `coalesceSync`, the cross-process PostgreSQL lock and the
+  transaction-level fence.
 - Recurring and contract forecast entries pass `typicalDay` and their real
   interval, or a date clamped to a short month becomes the anchor.
 - A liability with `linked_account_id` has a stale `current_balance_minor`;
@@ -949,10 +965,8 @@ the long-lived server process; do not set global `BUN_OPTIONS` for builds,
 installs or migrations. Preserve readiness and background work when measuring
 memory savings. Removing the runtime flag is the rollback.
 
-Fortuna also has an explicit Railway start-command override. Keep it aligned
-with `bun --smol .output/server/index.mjs` in `package.json` and the Dockerfile.
-Railway rejects new legacy Config as Code bindings; preserve the existing
-service settings rather than introducing a `railway.toml` for this override.
+The old Railway start-command override is historical; keep the production
+Dockerfile and package start command aligned.
 
 ## Standalone brand runtime
 
@@ -964,7 +978,7 @@ separate page relay still needs opaque-origin support for downloaded bundles.
 
 ## Main-only branch lifecycle and security reporting
 
-`main` is the only retained local and remote branch for this active Railway
+`main` is the only retained local and remote branch for this active
 repository. Temporary PR branches are allowed only while work is in progress.
 Keep required checks and branch protections; never bypass them to avoid a branch.
 Before finishing, merge validated work, delete the remote and local task branches,
@@ -983,7 +997,7 @@ credentials, production records and personal data from public issues and commits
 
 ## Production security gates
 
-Railway waits for successful GitHub workflows on `main`. Keep an always-running
+Verified images are published only after successful GitHub workflows on `main`. Keep an always-running
 push workflow and do not cancel its main-branch runs. PR branch cleanup never
 justifies bypassing CI. Public repositories also enforce CodeQL results on main.
 Container security builds the production image and scans OS and library packages.

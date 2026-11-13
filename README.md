@@ -1,5 +1,7 @@
 # Fortuna
 
+> Production runs on Vertex RKE2 via Fleet, with PostgreSQL on Longhorn and private S3-compatible document storage in Garage. The source image is published to GHCR after main CI and security scanning. Railway-specific material is historical.
+
 ![CI](https://github.com/Paul1404/fortuna/actions/workflows/ci.yml/badge.svg)
 
 Public source for a private, single-user finance application.
@@ -80,7 +82,7 @@ On a phone.
 | Auth | better-auth (email + password, sign-up disabled, secure cookies) |
 | Styling | Tailwind v4 with the Fortuna brand tokens, Spectral / Instrument Sans / IBM Plex Mono self-hosted |
 | Quality | Biome, TypeScript strict, Vitest unit + integration tests |
-| Deployment | Docker image on Railway (IaC in `.railway/railway.ts`) with a preDeploy migrator and `/api/health` |
+| Deployment | Verified GHCR image on Vertex RKE2 via Fleet, with an init-container migrator and `/api/health` |
 
 ## Getting started
 
@@ -109,14 +111,14 @@ copy production configuration or bank/broker credentials.
 
 | Variable | Required | Purpose |
 | --- | --- | --- |
-| `DATABASE_URL` | yes | PostgreSQL connection string. Railway's Postgres plugin injects it. |
+| `DATABASE_URL` | yes | PostgreSQL connection string supplied through a runtime secret. |
 | `BETTER_AUTH_SECRET` | yes | At least 32 random characters (`openssl rand -hex 32`). Signs sessions and derives the key that encrypts stored bank-provider secrets. Rotating it invalidates sessions and stored provider tokens. |
 | `BETTER_AUTH_URL` | yes in production | Public base URL, e.g. `https://fortuna.example.com`. Used for cookies, trusted origins and MCP host validation. |
 | `AUTH_TRUSTED_ORIGINS` | no | Comma-separated extra origins allowed to call the auth endpoints. |
 | `OWNER_EMAIL`, `OWNER_PASSWORD`, `OWNER_NAME` | first deploy | Owner account created by `db:migrate` when it does not exist. Password: 12+ characters. |
 | `MCP_BEARER_TOKEN` | no | Enables the read-only MCP endpoint at `/api/mcp` when set to 32+ random characters. |
 | `OBJECT_STORAGE_ENDPOINT`, `OBJECT_STORAGE_REGION`, `OBJECT_STORAGE_BUCKET` | no | S3-compatible private storage for encrypted documents. If omitted, Fortuna keeps using the encrypted PostgreSQL fallback. |
-| `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` | with object storage | S3-compatible credentials. Keep them server-side and inject them through Railway references. |
+| `OBJECT_STORAGE_ACCESS_KEY_ID`, `OBJECT_STORAGE_SECRET_ACCESS_KEY` | with object storage | S3-compatible credentials. Keep them server-side and inject them through runtime secrets. |
 | `OBJECT_STORAGE_FORCE_PATH_STYLE` | no | Set to `true` only for S3-compatible providers that require path-style URLs. |
 | `LOG_LEVEL` | no | `debug`, `info` (production default), `warn`, `error`. |
 | `DATABASE_CONNECTION_TIMEOUT_MS`, `DATABASE_QUERY_TIMEOUT_MS` | no | Pool timeouts (defaults 5 s / 15 s). |
@@ -345,34 +347,23 @@ checked against `BETTER_AUTH_URL`.
   passwords, tokens, connection strings and IBANs out of them.
 - No third-party analytics, fonts are self-hosted, `robots: noindex`.
 
-## Deployment (Railway)
+## Deployment
 
-The project is defined as Railway infrastructure-as-code in
-`.railway/railway.ts`: a PostgreSQL service and the `fortuna-app` service
-built from the Dockerfile on the `main` branch of the GitHub repo, with
-`bun src/server/db/migrate.ts` as the pre-deploy step (migrations + owner
-account), `bun .output/server/index.mjs` as the start command and
-`/api/health` as the health check, served at https://fortuna.pdcd.net (CNAME in the
-pdcd.net Route 53 hosted zone pointing at the Railway edge). Every push to
-`main` deploys.
+Fortuna runs on Vertex RKE2 using the multi-stage `Dockerfile`. Main-branch
+images are published to GHCR after CI and security scanning, then promoted by
+digest into the private Fleet configuration. Fleet runs PostgreSQL on Longhorn
+and the application with a migration init container. Private encrypted
+application documents use the S3-compatible Garage service.
 
-1. `railway config plan` shows the difference between the file and the
-   live project; `railway config apply` applies it after review.
-2. Set the secrets in the Railway service (they are `preserve()`d in source):
-   `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL` (the public URL), `OWNER_EMAIL`,
-   `OWNER_PASSWORD`, `OWNER_NAME` and optionally `MCP_BEARER_TOKEN`.
-   The IaC file also creates the private `fortuna-files` bucket and injects its
-   S3-compatible credentials into the app through resource references.
-3. Push to `main`. The migrator aborts the deployment on failure, so the
-   previous release keeps serving.
+The public hostname is https://fortuna.pdcd.net. Runtime configuration and
+credentials are supplied outside Git. `/api/health` checks deployment readiness;
+verify Fleet reconciliation and authenticated behavior separately. Railway
+configuration under `.railway/` is historical, not the active deployment path.
 
-Any Docker host works the same way: run the migrator once with the same
-environment, then start the image.
-
-The historical chain needs per-file commits for an empty database. Bootstrap
-an isolated local database first with `db:bootstrap:local`. Existing production
-databases continue through `db:migrate`; do not rewrite applied SQL or rotate
-the encryption secret as part of publication.
+The historical migration chain needs per-file commits for an empty database.
+Bootstrap an isolated local database first with `db:bootstrap:local`. Existing
+production databases continue through `db:migrate`; do not rewrite applied SQL
+or rotate encryption secrets as part of publication.
 
 ### Backup and restore
 
@@ -384,8 +375,7 @@ DATABASE_URL=... scripts/restore-postgres.sh /backups/fortuna-2026-09-14.dump
 Backups are `pg_dump` custom-format archives and contain everything, including
 encrypted provider secrets (which only decrypt with the same
 `BETTER_AUTH_SECRET`). Keep the secret with the backup, store both encrypted,
-and test a restore into an empty database before relying on it. Railway's
-Postgres service additionally offers its own volume backups. CSV exports of
+and test a restore into an empty database before relying on it. CSV exports of
 transactions, assets, liabilities and net-worth history are available under
 Imports & export.
 

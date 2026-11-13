@@ -44,7 +44,7 @@ export const Route = createFileRoute("/api/bank/enable-banking/callback")({
 					if (
 						error instanceof EnableBankingAuthorizationError &&
 						error.reason === "connection_not_found" &&
-						wasRecentlyCompleted(state)
+						(await wasRecentlyCompleted(state))
 					)
 						return redirect("connected");
 					// Telling the owner the approval was not completed when it was is

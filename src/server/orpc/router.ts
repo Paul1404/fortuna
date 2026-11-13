@@ -9,6 +9,7 @@ import {
 	BalanceInput,
 	BrokerOrderId,
 	BrokerOrderPreview,
+	BrokerOrderResolution,
 	BrokerOrderSubmit,
 	CashMovementInput,
 	CategoryConsult,
@@ -762,6 +763,11 @@ export const router = {
 			.input(BrokerOrderId)
 			.handler(({ context, input }) =>
 				brokerOrdersSvc.discardPreview(context.user.id, input.orderId),
+			),
+		resolveUnknown: mutation
+			.input(BrokerOrderResolution)
+			.handler(({ context, input }) =>
+				brokerOrdersSvc.resolveUnknownSubmission(context.user.id, input),
 			),
 		list: sessionRead.handler(({ context }) =>
 			brokerOrdersSvc.listOrders(context.user.id),
